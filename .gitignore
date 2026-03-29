@@ -49,3 +49,7 @@ Thumbs.db
 # Logs
 logs/*
 !logs/.gitkeep
+
+# AI artifacts (not versioned)
+ai/
+CLAUDE.md

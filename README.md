@@ -1,6 +1,12 @@
-# Medusa — Multi-Language Algorithmic Trading System
+<p align="center">
+  <img src="assets/medusa-logo.jpeg" alt="Medusa HFT Trading System" width="400">
+</p>
 
-**kdb+tick architecture** with **TorQ framework** for production HFT infrastructure.
+<h1 align="center">Medusa</h1>
+<p align="center"><strong>Multi-Language Algorithmic Trading System</strong></p>
+<p align="center">kdb+tick architecture with TorQ framework for production HFT infrastructure</p>
+
+---
 
 A multi-language algorithmic trading system inspired by Gryphon, built with:
 - **q/kdb+**: Core trading engine, in-memory analytics, and schema
