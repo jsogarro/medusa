@@ -1,0 +1,47 @@
+/ Medusa — Main initialization script
+/ Loads all modules in correct dependency order
+
+\d .medusa
+
+/ Project metadata
+version:"0.1.0";
+name:`medusa;
+
+/ Display banner
+-1 "========================================";
+-1 "  Medusa — Algorithmic Trading System";
+-1 "  Version: ",version;
+-1 "========================================";
+-1 "";
+
+/ Load schema (table definitions)
+-1 "Loading schema...";
+\l schema/tables.q
+
+/ Load libraries (uncomment as implemented)
+/ -1 "Loading libraries...";
+/ \l lib/money.q
+/ \l lib/config.q
+
+/ Load exchange wrappers
+/ -1 "Loading exchange wrappers...";
+/ \l exchange/common.q
+
+/ Load engine
+/ -1 "Loading strategy engine...";
+/ \l engine/harness.q
+
+/ Load audit system
+/ -1 "Loading audit system...";
+/ \l audit/logger.q
+
+/ Load risk management
+/ -1 "Loading risk management...";
+/ \l risk/limits.q
+
+-1 "";
+-1 "Medusa initialized successfully";
+-1 "Available namespaces: .schema";
+-1 "";
+
+\d .

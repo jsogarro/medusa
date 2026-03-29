@@ -1,0 +1,59 @@
+services:
+  # kdb+ Tickerplant + RDB (development)
+  kdb:
+    image: kx/kdb:latest
+    container_name: medusa-kdb
+    ports:
+      - "5010:5010"  # Tickerplant
+      - "5011:5011"  # RDB
+      - "5012:5012"  # HDB
+    volumes:
+      - ./src/q:/opt/medusa/q:ro
+      - ./data:/opt/medusa/data:rw
+      - ./logs:/opt/medusa/logs:rw
+    environment:
+      - QHOME=/opt/kdb
+      - MEDUSA_ROOT=/opt/medusa
+    command: ["q", "/opt/medusa/q/init.q", "-p", "5010"]
+    networks:
+      - medusa-net
+    restart: unless-stopped
+
+  # Rust exchange daemon
+  rust-daemon:
+    build:
+      context: ./src/rust
+      dockerfile: ../../Dockerfile.rust
+    container_name: medusa-rust-daemon
+    depends_on:
+      - kdb
+    environment:
+      - KDB_HOST=kdb
+      - KDB_PORT=5010
+      - RUST_LOG=exchange_daemon=info
+      - STUB_MODE=1
+    networks:
+      - medusa-net
+    restart: unless-stopped
+
+  # Jupyter notebook for research
+  jupyter:
+    build:
+      context: ./src/python
+      dockerfile: ../../Dockerfile.python
+    container_name: medusa-jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./src/python:/opt/medusa/python:rw
+      - ./data:/opt/medusa/data:rw
+    environment:
+      - KDB_HOST=kdb
+      - KDB_PORT=5010
+    command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+    networks:
+      - medusa-net
+
+networks:
+  medusa-net:
+    driver: bridge

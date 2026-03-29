@@ -1,0 +1,51 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# q/kdb+
+*.log
+*.qlog
+.q_history
+
+# Data (do not commit real market data)
+data/*
+!data/.gitkeep
+
+# Environment
+.env
+.env.local
+*.qlic
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker-data/
+
+# Logs
+logs/*
+!logs/.gitkeep
