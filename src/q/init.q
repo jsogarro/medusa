@@ -16,12 +16,15 @@ name:`medusa;
 
 / Load schema (table definitions)
 -1 "Loading schema...";
-\l schema/tables.q
+\l schema/init.q
+.qg.loadAllSchemas[];
+.qg.initAllTables[];
+.qg.validateSchema[];
 
 / Load libraries (uncomment as implemented)
-/ -1 "Loading libraries...";
-/ \l lib/money.q
-/ \l lib/config.q
+-1 "Loading libraries...";
+\l lib/money.q
+\l config/config.q
 
 / Load exchange wrappers
 / -1 "Loading exchange wrappers...";
@@ -41,7 +44,8 @@ name:`medusa;
 
 -1 "";
 -1 "Medusa initialized successfully";
--1 "Available namespaces: .schema";
+-1 "Available namespaces: .schema .money .conf .qg";
+-1 "Core tables: exchange balance position target order trade transaction datum flag";
 -1 "";
 
 \d .

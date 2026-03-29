@@ -5,5 +5,7 @@
 pub mod client;
 pub mod types;
 
-pub use client::ExchangeClient;
-pub use types::{Order, OrderBook, OrderType, PriceLevel, Side, Trade};
+pub use client::{ExchangeClient, ExchangeError};
+pub use types::{
+    Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side, Trade,
+};

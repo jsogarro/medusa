@@ -5,4 +5,5 @@
 pub mod client;
 pub mod protocol;
 
-pub use client::KdbClient;
+pub use client::{ClientError, KdbClient};
+pub use protocol::{MessageType, ProtocolError};

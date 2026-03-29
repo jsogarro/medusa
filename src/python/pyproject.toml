@@ -17,24 +17,29 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
 ]
 
 dependencies = [
-    "pandas>=2.1.0",
-    "numpy>=1.26.0",
-    "pyarrow>=14.0.0",
+    "pandas>=2.2.0",
+    "numpy>=2.0.0",
+    "pyarrow>=17.0.0",
+    # PyKX will be added in Wave 8 for kdb+ integration
+    # "pykx>=2.5.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.1.0",
-    "ruff>=0.1.0",
-    "mypy>=1.7.0",
-    "jupyter>=1.0.0",
-    "jupyterlab>=4.0.0",
-    "matplotlib>=3.8.0",
+    "pytest>=9.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.9.0",
+    "mypy>=1.14.0",
+    "jupyter>=1.1.0",
+    "jupyterlab>=4.3.0",
+    "matplotlib>=3.10.0",
+    "pandas-stubs>=2.2.0",  # Type stubs for pandas
 ]
 
 [tool.setuptools.packages.find]
@@ -66,13 +71,9 @@ warn_return_any = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = "pandas.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "numpy.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
 module = "matplotlib.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pykx.*"
 ignore_missing_imports = true
