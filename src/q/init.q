@@ -27,8 +27,10 @@ name:`medusa;
 \l config/config.q
 
 / Load exchange wrappers
-/ -1 "Loading exchange wrappers...";
-/ \l exchange/common.q
+-1 "Loading exchange wrappers...";
+\l exchange/base.q
+\l exchange/registry.q
+\l exchange/stub.q
 
 / Load engine
 / -1 "Loading strategy engine...";
@@ -44,8 +46,9 @@ name:`medusa;
 
 -1 "";
 -1 "Medusa initialized successfully";
--1 "Available namespaces: .schema .money .conf .qg";
+-1 "Available namespaces: .schema .money .conf .qg .exchange";
 -1 "Core tables: exchange balance position target order trade transaction datum flag";
+-1 "Exchange wrappers: base, registry, stub";
 -1 "";
 
 \d .

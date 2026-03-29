@@ -56,6 +56,76 @@ impl ExchangeError {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ====================================================================
+    // ERROR HANDLING TESTS
+    // ====================================================================
+
+    #[test]
+    fn test_error_is_retryable() {
+        // Test retryable errors
+        assert!(ExchangeError::RateLimit("Too many requests".to_string()).is_retryable());
+        assert!(ExchangeError::Unavailable("Service down".to_string()).is_retryable());
+
+        // Test non-retryable errors
+        assert!(!ExchangeError::InvalidRequest("Bad params".to_string()).is_retryable());
+        assert!(!ExchangeError::Authentication("Invalid key".to_string()).is_retryable());
+        assert!(!ExchangeError::InsufficientBalance("Not enough funds".to_string()).is_retryable());
+        assert!(!ExchangeError::OrderNotFound("Order 123".to_string()).is_retryable());
+        assert!(!ExchangeError::Other("Unknown".to_string()).is_retryable());
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = ExchangeError::RateLimit("Exceeded 10/sec".to_string());
+        let display = format!("{}", err);
+        assert!(display.contains("Rate limit exceeded"));
+        assert!(display.contains("10/sec"));
+    }
+
+    #[test]
+    fn test_error_from_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
+        let exchange_err: ExchangeError = json_err.into();
+        assert!(matches!(exchange_err, ExchangeError::JsonParse(_)));
+    }
+
+    #[test]
+    fn test_error_insufficient_balance() {
+        let err = ExchangeError::InsufficientBalance("Need 100 USD, have 50 USD".to_string());
+        assert!(!err.is_retryable());
+        let display = format!("{}", err);
+        assert!(display.contains("Insufficient balance"));
+    }
+
+    #[test]
+    fn test_error_order_not_found() {
+        let err = ExchangeError::OrderNotFound("Order ID abc123 not found".to_string());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_error_authentication() {
+        let err = ExchangeError::Authentication("Invalid API key".to_string());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_error_invalid_request() {
+        let err = ExchangeError::InvalidRequest("Quantity must be positive".to_string());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_error_other() {
+        let err = ExchangeError::Other("Unknown error occurred".to_string());
+        assert!(!err.is_retryable());
+    }
+}
+
 /// Common interface for exchange clients
 ///
 /// # Design Notes

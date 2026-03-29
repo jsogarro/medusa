@@ -38,5 +38,16 @@ chrono = { version = "0.4", features = ["serde"] }
 bytes = "1.5"
 byteorder = "1.5"
 
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+url = "2.5"
+
+# Cryptography for exchange authentication
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+
 # Async trait
 async-trait = "0.1"
