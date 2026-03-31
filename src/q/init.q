@@ -31,6 +31,11 @@ name:`medusa;
 \l exchange/base.q
 \l exchange/registry.q
 \l exchange/stub.q
+\l exchange/coordinator.q
+
+/ Load strategy libraries
+-1 "Loading strategy libraries...";
+\l strategy/arb.q
 
 / Load engine
 / -1 "Loading strategy engine...";
@@ -46,9 +51,10 @@ name:`medusa;
 
 -1 "";
 -1 "Medusa initialized successfully";
--1 "Available namespaces: .schema .money .conf .qg .exchange";
+-1 "Available namespaces: .schema .money .conf .qg .exchange .strategy";
 -1 "Core tables: exchange balance position target order trade transaction datum flag";
--1 "Exchange wrappers: base, registry, stub";
+-1 "Exchange wrappers: base, registry, stub, coordinator";
+-1 "Strategy libraries: arb (arbitrage detection)";
 -1 "";
 
 \d .
