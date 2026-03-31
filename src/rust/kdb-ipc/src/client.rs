@@ -1,122 +1,260 @@
 //! kdb+ IPC client
 //!
 //! Async client for communicating with kdb+ processes via IPC protocol.
-//!
-//! # Current Implementation
-//! Stub implementation. Full implementation in later waves will include:
-//! - TCP connection management with tokio::net::TcpStream
-//! - Authentication handshake (username:password)
-//! - Message framing and serialization via protocol module
-//! - Connection pooling for high throughput
-//! - Automatic reconnection with exponential backoff
 
-use crate::protocol::ProtocolError;
-use thiserror::Error;
+use crate::decode::Decoder;
+use crate::encode::Encoder;
+use crate::error::{KdbError, Result};
+use crate::types::KObject;
+use byteorder::LittleEndian;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::{timeout, Duration};
 
-/// Client-level errors
-#[derive(Debug, Error)]
-pub enum ClientError {
-    #[error("Connection error: {0}")]
-    Connection(String),
+/// Maximum message size (100 MB)
+const MAX_MESSAGE_SIZE: u32 = 100 * 1024 * 1024;
 
-    #[error("Authentication failed: {0}")]
-    Authentication(String),
-
-    #[error("Protocol error: {0}")]
-    Protocol(#[from] ProtocolError),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("Not connected")]
-    NotConnected,
-}
+/// Timeout for network operations (30 seconds)
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Async client for kdb+ IPC
 ///
 /// # Lifecycle
-/// 1. Create with `new()`
-/// 2. Connect with `connect()` (establishes TCP connection and authenticates)
-/// 3. Execute queries with `execute()`
-/// 4. Disconnect with `disconnect()` (graceful shutdown)
+/// 1. Create with `connect()`
+/// 2. Execute queries with `query()`, `send_sync()`, or `send_async()`
+/// 3. Subscribe to updates with `subscribe()`
+/// 4. Disconnect with `disconnect()` or drop
+#[derive(Debug)]
 pub struct KdbClient {
-    host: String,
-    port: u16,
-    /// TCP connection (None until connected)
-    stream: Option<TcpStream>,
-    /// Credentials for authentication
-    credentials: Option<(String, String)>,
+    stream: TcpStream,
 }
 
 impl KdbClient {
-    /// Create a new kdb+ client
-    pub fn new(host: String, port: u16) -> Self {
-        Self {
-            host,
-            port,
-            stream: None,
-            credentials: None,
-        }
-    }
-
-    /// Set authentication credentials (username, password)
-    pub fn with_credentials(mut self, username: String, password: String) -> Self {
-        self.credentials = Some((username, password));
-        self
-    }
-
-    /// Connect to kdb+ process
+    /// Connect to kdb+ process with authentication
     ///
-    /// # Current Implementation
-    /// Stub: just logs connection attempt. Full implementation will:
-    /// - Open TCP connection
-    /// - Send authentication credentials
-    /// - Verify handshake response
-    pub async fn connect(&mut self) -> Result<(), ClientError> {
-        tracing::info!("Connecting to kdb+ at {}:{}", self.host, self.port);
-        // TODO: Implement TCP connection and authentication
+    /// # Arguments
+    /// * `host` - Host address
+    /// * `port` - Port number
+    /// * `username` - Username for authentication (empty string for no auth)
+    /// * `password` - Password for authentication (empty string for no auth)
+    ///
+    /// # Returns
+    /// Connected client or error
+    pub async fn connect(
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> Result<Self> {
+        tracing::info!("Connecting to kdb+ at {}:{}", host, port);
+
+        let mut stream = TcpStream::connect(format!("{}:{}", host, port))
+            .await
+            .map_err(|e| KdbError::ConnectionError(e.to_string()))?;
+
+        // Send authentication credentials
+        // Format: "username:password\x03\x00"
+        let auth_msg = if username.is_empty() && password.is_empty() {
+            ":\x03\x00".to_string()
+        } else {
+            format!("{}:{}\x03\x00", username, password)
+        };
+
+        stream
+            .write_all(auth_msg.as_bytes())
+            .await
+            .map_err(|e| KdbError::ConnectionError(e.to_string()))?;
+
+        // Wait for authentication response (1 byte: 0x01 = success, 0x00 = failure)
+        let mut response = [0u8; 1];
+        timeout(NETWORK_TIMEOUT, stream.read_exact(&mut response))
+            .await
+            .map_err(|_| KdbError::ConnectionError("Authentication timeout".to_string()))?
+            .map_err(|e| KdbError::ConnectionError(e.to_string()))?;
+
+        if response[0] != 1 {
+            return Err(KdbError::AuthenticationFailed);
+        }
+
+        tracing::info!("Successfully connected and authenticated");
+
+        Ok(Self { stream })
+    }
+
+    /// Send an async message (fire-and-forget)
+    ///
+    /// # Arguments
+    /// * `obj` - K object to send
+    ///
+    /// # Returns
+    /// Success or error
+    pub async fn send_async(&mut self, obj: KObject) -> Result<()> {
+        let mut encoder = Encoder::new();
+        let msg = encoder.encode_async(&obj)?;
+
+        self.stream
+            .write_all(&msg)
+            .await
+            .map_err(KdbError::IoError)?;
+
         Ok(())
+    }
+
+    /// Send a sync message and wait for response
+    ///
+    /// # Arguments
+    /// * `obj` - K object to send
+    ///
+    /// # Returns
+    /// Response K object or error
+    pub async fn send_sync(&mut self, obj: KObject) -> Result<KObject> {
+        let mut encoder = Encoder::new();
+        let msg = encoder.encode_sync(&obj)?;
+
+        self.stream
+            .write_all(&msg)
+            .await
+            .map_err(KdbError::IoError)?;
+
+        self.read_response().await
+    }
+
+    /// Execute a q query string (convenience wrapper for send_sync)
+    ///
+    /// # Arguments
+    /// * `query` - Query string to execute
+    ///
+    /// # Returns
+    /// Response K object or error
+    pub async fn query(&mut self, query: &str) -> Result<KObject> {
+        let obj = KObject::CharList(query.as_bytes().to_vec());
+        self.send_sync(obj).await
+    }
+
+    /// Read a response from the server
+    ///
+    /// # Returns
+    /// Decoded K object or error
+    pub async fn read_response(&mut self) -> Result<KObject> {
+        // Read header (8 bytes) with timeout
+        let mut header = [0u8; 8];
+        timeout(NETWORK_TIMEOUT, self.stream.read_exact(&mut header))
+            .await
+            .map_err(|_| KdbError::ConnectionError("Read timeout (header)".to_string()))?
+            .map_err(KdbError::IoError)?;
+
+        // Parse message length from header
+        let mut cursor = std::io::Cursor::new(&header[4..8]);
+        let total_length = byteorder::ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)?;
+
+        // Validate message size
+        if total_length < 8 {
+            return Err(KdbError::InvalidMessage(format!(
+                "Message length {} is less than minimum header size 8",
+                total_length
+            )));
+        }
+
+        if total_length > MAX_MESSAGE_SIZE {
+            return Err(KdbError::InvalidMessage(format!(
+                "Message length {} exceeds maximum {}",
+                total_length, MAX_MESSAGE_SIZE
+            )));
+        }
+
+        // Read full message (including header we already read) with timeout
+        let mut full_msg = vec![0u8; total_length as usize];
+        full_msg[..8].copy_from_slice(&header);
+        timeout(NETWORK_TIMEOUT, self.stream.read_exact(&mut full_msg[8..]))
+            .await
+            .map_err(|_| KdbError::ConnectionError("Read timeout (payload)".to_string()))?
+            .map_err(KdbError::IoError)?;
+
+        // Decode message
+        let mut decoder = Decoder::new(full_msg);
+        let obj = decoder.decode_message()?;
+
+        // Check for kdb+ error response
+        if let KObject::Error(msg) = &obj {
+            return Err(KdbError::KdbRuntimeError(msg.clone()));
+        }
+
+        Ok(obj)
+    }
+
+    /// Subscribe to updates from kdb+ (continuous read loop)
+    ///
+    /// # Arguments
+    /// * `callback` - Function to call for each received message
+    ///
+    /// # Returns
+    /// Error if subscription fails (never returns on success)
+    pub async fn subscribe<F>(&mut self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(KObject) -> Result<()>,
+    {
+        loop {
+            let obj = self.read_response().await?;
+            callback(obj)?;
+        }
     }
 
     /// Disconnect from kdb+ process
-    ///
-    /// Gracefully closes the TCP connection
-    pub async fn disconnect(&mut self) -> Result<(), ClientError> {
-        if self.stream.is_some() {
-            tracing::info!("Disconnecting from kdb+ at {}:{}", self.host, self.port);
-            self.stream = None;
-        }
+    pub async fn disconnect(mut self) -> Result<()> {
+        self.stream
+            .shutdown()
+            .await
+            .map_err(KdbError::IoError)?;
+        tracing::info!("Disconnected from kdb+");
         Ok(())
-    }
-
-    /// Check if client is connected
-    pub fn is_connected(&self) -> bool {
-        self.stream.is_some()
-    }
-
-    /// Execute a q expression
-    ///
-    /// # Current Implementation
-    /// Stub: just returns empty response. Full implementation will:
-    /// - Serialize query via protocol module
-    /// - Send over TCP connection
-    /// - Read response
-    /// - Deserialize response via protocol module
-    pub async fn execute(&self, query: &str) -> Result<Vec<u8>, ClientError> {
-        if !self.is_connected() {
-            return Err(ClientError::NotConnected);
-        }
-        tracing::debug!("Executing query: {}", query);
-        // TODO: Implement query execution
-        Ok(vec![])
     }
 }
 
-impl Drop for KdbClient {
-    fn drop(&mut self) {
-        if self.stream.is_some() {
-            tracing::warn!("KdbClient dropped while still connected - connection not gracefully closed");
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Integration tests - require a running kdb+ process
+    // Run with: cargo test -- --ignored
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_connect_and_query() {
+        let mut client = KdbClient::connect("localhost", 5001, "", "")
+            .await
+            .unwrap();
+
+        let result = client.query("2+2").await.unwrap();
+        assert!(matches!(result, KObject::Long(4)));
+
+        client.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_send_async() {
+        let mut client = KdbClient::connect("localhost", 5001, "", "")
+            .await
+            .unwrap();
+
+        let obj = KObject::CharList(b"show `async_test".to_vec());
+        client.send_async(obj).await.unwrap();
+
+        client.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_auth_failure() {
+        let result = KdbClient::connect("localhost", 5001, "bad", "creds").await;
+        assert!(matches!(result, Err(KdbError::AuthenticationFailed)));
+    }
+
+    #[tokio::test]
+    async fn test_connect_unreachable() {
+        // 192.0.2.1 is TEST-NET-1, guaranteed unreachable
+        let result = KdbClient::connect("192.0.2.1", 9999, "", "").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), KdbError::ConnectionError(_)));
     }
 }
