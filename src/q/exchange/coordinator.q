@@ -66,6 +66,9 @@ orderRouting:([orderId:`symbol$()]
 / Coordinator mode (dryrun or live)
 coordinatorMode:`dryrun;
 
+/ Atomic order ID counter
+orderIdCounter:0;
+
 // ============================================================================
 / CONFIGURATION
 // ============================================================================
@@ -93,6 +96,7 @@ init:{[]
   positions::0#positions;
   orderRouting::0#orderRouting;
   coordinatorMode::`dryrun;
+  orderIdCounter::0;
 
   / Log initialization
   -1 "  Exchange coordinator initialized (mode: dryrun)";
@@ -193,8 +197,9 @@ placeOrder:{[exchangeName;pair;orderType;side;price;quantity]
   if[not side in `buy`sell; '"Invalid side: must be `buy or `sell"];
   if[null pair; '"Invalid pair: pair cannot be null"];
 
-  / Generate orderId BEFORE placement to prevent race condition
-  orderId:`$"ORD_",string .z.p,"_",(string exchangeName),"_",(string pair);
+  / Generate orderId using atomic counter
+  orderIdCounter+:1;
+  orderId:`$"ORD_",string[orderIdCounter],"_",string[exchangeName];
 
   / Check for duplicate order (race condition prevention)
   if[orderId in key orderRouting;
