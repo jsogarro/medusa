@@ -1,0 +1,17 @@
+[package]
+name = "gds-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+kdb-ipc = { path = "../kdb-ipc" }
+exchange-connector = { path = "../exchange-connector" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

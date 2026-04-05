@@ -3,6 +3,9 @@ members = [
     "exchange-connector",
     "kdb-ipc",
     "exchange-daemon",
+    "gds-common",
+    "gds-orderbook-subscriber",
+    "gds-trade-subscriber",
 ]
 resolver = "2"
 

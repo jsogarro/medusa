@@ -42,8 +42,14 @@ name:`medusa;
 / \l engine/harness.q
 
 / Load audit system
-/ -1 "Loading audit system...";
-/ \l audit/logger.q
+-1 "Loading audit system...";
+\l audit/audit.q
+\l audit/order.q
+\l audit/volume_balance.q
+\l audit/fiat_balance.q
+\l audit/ledger.q
+\l audit/position_cache.q
+\l audit/runner.q
 
 / Load risk management
 / -1 "Loading risk management...";
@@ -51,10 +57,11 @@ name:`medusa;
 
 -1 "";
 -1 "Medusa initialized successfully";
--1 "Available namespaces: .schema .money .conf .qg .exchange .strategy";
+-1 "Available namespaces: .schema .money .conf .qg .exchange .strategy .audit";
 -1 "Core tables: exchange balance position target order trade transaction datum flag";
 -1 "Exchange wrappers: base, registry, stub, coordinator";
 -1 "Strategy libraries: arb (arbitrage detection)";
+-1 "Audit system: ORDER, VOLUME_BALANCE, FIAT_BALANCE, LEDGER, POSITION_CACHE";
 -1 "";
 
 \d .

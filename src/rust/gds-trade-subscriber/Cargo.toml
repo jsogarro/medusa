@@ -1,0 +1,31 @@
+[package]
+name = "gds-trade-subscriber"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gds-trade-subscriber"
+path = "src/main.rs"
+
+[dependencies]
+gds-common = { path = "../gds-common" }
+exchange-connector = { path = "../exchange-connector" }
+kdb-ipc = { path = "../kdb-ipc" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
