@@ -1,4 +1,4 @@
-"""Data loading from kdb+ and other sources."""
+"""Legacy data loader — DEPRECATED. Use kdb_loader.py instead."""
 
 from __future__ import annotations
 
