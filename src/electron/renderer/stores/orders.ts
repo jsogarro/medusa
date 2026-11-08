@@ -11,9 +11,12 @@ interface OrdersState {
 
 export const useOrdersStore = create<OrdersState>((set) => ({
   orders: [],
+  // Upsert by orderId: kdb+ publishes a row for every status change of the same order.
   addOrder: (order) =>
     set((state) => ({
-      orders: [order, ...state.orders]
+      orders: state.orders.some((o) => o.orderId === order.orderId)
+        ? state.orders.map((o) => (o.orderId === order.orderId ? { ...o, ...order } : o))
+        : [order, ...state.orders]
     })),
   updateOrder: (orderId, updates) =>
     set((state) => ({

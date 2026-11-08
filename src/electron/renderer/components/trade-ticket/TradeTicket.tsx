@@ -1,10 +1,11 @@
-import { useState, useEffect, memo } from 'react'
+import { useState, useEffect, useRef, memo } from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card'
 import { Input } from '../ui/input'
 import { Button } from '../ui/button'
 import { LinkColor, useSymbolLinkStore } from '../../stores/symbolLink'
 import { AlgoSelector, AlgoParams } from '../trading/AlgoSelector'
 import { AssetClassSwitcher } from './AssetClassSwitcher'
+import { createSubmitGuard } from '../../lib/kdb-actions'
 import {
   ASSET_CLASS_CONFIG,
   inferTradingAssetClass,
@@ -52,6 +53,8 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
   const [quantity, setQuantity] = useState('')
   const [strategy, setStrategy] = useState('manual')
   const [algoParams, setAlgoParams] = useState<AlgoParams>({ type: 'direct' })
+  const [submitting, setSubmitting] = useState(false)
+  const submitGuard = useRef(createSubmitGuard()).current
 
   useEffect(() => {
     if (!assetConfig.supportedOrderTypes.includes(orderType)) {
@@ -72,14 +75,33 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
       strategy
     }
 
-    const result = await window.kdb.placeOrder(order)
-    if (result.success) {
-      alert(`Order submitted: ${result.data.orderId}`)
-      setPrice('')
-      setQuantity('')
-    } else {
-      alert(`Order failed: ${result.error}`)
+    if (!Number.isFinite(order.quantity) || (orderType === 'limit' && !Number.isFinite(order.price))) {
+      alert('Enter a valid price and quantity')
+      return
     }
+    const summary = `${side.toUpperCase()} ${order.quantity} ${pair} on ${exchange} (${
+      orderType === 'market' ? 'market' : `limit @ ${order.price}`
+    })`
+    if (!confirm(`Submit order?\n${summary}`)) return
+
+    // One submission at a time: a second click or Enter while one is in flight is dropped.
+    await submitGuard(async () => {
+      setSubmitting(true)
+      try {
+        const result = await window.kdb.placeOrder(order)
+        if (result.success) {
+          alert(`Order submitted: ${result.data.orderId}`)
+          setPrice('')
+          setQuantity('')
+        } else {
+          alert(`Order failed: ${result.error}`)
+        }
+      } catch (err) {
+        alert(`Order failed: ${String(err)}`)
+      } finally {
+        setSubmitting(false)
+      }
+    })
   }
 
   return (
@@ -195,6 +217,7 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
           <Button
             type="submit"
             className="w-full"
+            disabled={submitting}
             variant={algoParams.type === 'direct' ? (side === 'buy' ? 'buy' : 'sell') : 'default'}
             style={
               algoParams.type !== 'direct'

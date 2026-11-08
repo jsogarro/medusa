@@ -1,5 +1,6 @@
 import { AlertTriangle } from 'lucide-react'
 import { Button } from '../ui/button'
+import { runEmergencyStop } from '../../lib/kdb-actions'
 import { useExchangesStore } from '../../stores/exchanges'
 
 export function Navbar() {
@@ -7,9 +8,7 @@ export function Navbar() {
 
   const handleEmergencyStop = () => {
     if (confirm('EMERGENCY STOP: This will cancel all orders and close all positions. Continue?')) {
-      window.kdb.emergencyStop()
-        .then(() => alert('Emergency stop executed'))
-        .catch((err: unknown) => alert(`Emergency stop failed: ${err}`))
+      void runEmergencyStop(window.kdb).then((r) => alert(r.message))
     }
   }
 

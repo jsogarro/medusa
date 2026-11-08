@@ -21,6 +21,7 @@ import { Settings } from './pages/Settings'
 import { useMockData } from './lib/use-mock-data'
 import { WidgetType } from './lib/workspace-types'
 import { LinkColor } from './stores/symbolLink'
+import { isPopOutSearch, loadKdbConfig, runEmergencyStop } from './lib/kdb-actions'
 import './styles/globals.css'
 
 export function App() {
@@ -49,14 +50,14 @@ export function App() {
   useEffect(() => {
     // Connect to kdb+ on app mount
     const connectToKdb = async () => {
-      // Load config from localStorage or use defaults
-      const savedConfig = localStorage.getItem('kdb-config')
-      const config = savedConfig
-        ? JSON.parse(savedConfig)
-        : {
-            tp: { host: 'localhost', port: 5010 },
-            rdb: { host: 'localhost', port: 5011 }
-          }
+      // Load config from localStorage (corrupt values fall back to defaults)
+      let savedConfig: string | null = null
+      try {
+        savedConfig = localStorage.getItem('kdb-config')
+      } catch {
+        // storage unavailable
+      }
+      const config = loadKdbConfig(savedConfig)
 
       if (!window.kdb) {
         console.warn('[App] window.kdb not available — running outside Electron')
@@ -71,15 +72,18 @@ export function App() {
       }
     }
 
-    connectToKdb()
+    // Only the main window owns the kdb+ connection; a pop-out reconnecting would tear it down.
+    if (!isPopOutSearch(window.location.search)) {
+      connectToKdb()
+    }
 
     // Keyboard shortcuts
     const handleKeyDown = (e: KeyboardEvent) => {
       // Emergency stop: Ctrl+Shift+E
       if (e.ctrlKey && e.shiftKey && e.key === 'E') {
         e.preventDefault()
-        if (window.kdb && confirm('EMERGENCY STOP: Cancel all orders and close positions?')) {
-          window.kdb.emergencyStop()
+        if (confirm('EMERGENCY STOP: Cancel all orders and close positions?')) {
+          void runEmergencyStop(window.kdb).then((r) => alert(r.message))
         }
       }
     }
