@@ -38,7 +38,7 @@ test-rust:
 
 test-python:
 	@echo "Running Python tests..."
-	cd $(PYTHON_DIR) && pytest tests/
+	cd $(PYTHON_DIR) && pytest -rs tests/
 	@echo "✓ Python tests passed"
 
 test-q:

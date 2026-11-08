@@ -13,13 +13,12 @@ from loguru import logger
 
 from medusa.utils.config import KdbConfig, get_settings
 
-_SYMBOL_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
-_INTERVAL_WHITELIST = {"1m", "5m", "15m", "1h", "4h", "1d"}
+_SYMBOL_RE = re.compile(r"[A-Za-z0-9._]{1,30}")
 
 
 def _validate_symbol(symbol: str) -> str:
     """Validate symbol contains only safe characters for q queries."""
-    if not _SYMBOL_RE.match(symbol):
+    if not _SYMBOL_RE.fullmatch(symbol):
         raise ValueError(f"Invalid symbol format: {symbol!r}")
     return symbol
 
@@ -108,7 +107,7 @@ class KdbDataLoader:
             host=self.config.host,
             port=target_port,
             username=self.config.username,
-            password=self.config.password,
+            password=self.config.password.get_secret_value(),
             timeout=self.config.timeout / 1000.0,
         )
         self._resilient_conn.connect()
@@ -197,7 +196,7 @@ class KdbDataLoader:
             symbol: Trading symbol (e.g. 'BTCUSDT').
             start_date: Start of date range.
             end_date: End of date range.
-            interval: Bar interval ('1m', '5m', '15m', '1h', '1d').
+            interval: Bar interval ('1m', '5m', '15m', '1h', '4h').
 
         Returns:
             DataFrame with columns: timestamp, open, high, low, close, volume

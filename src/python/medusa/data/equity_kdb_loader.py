@@ -11,14 +11,15 @@ from typing import Any
 import pandas as pd
 from loguru import logger
 
+from medusa.data.q_safe import TIMEFRAMES, q_choice
 from medusa.utils.config import KdbConfig, get_settings
 
-_SYMBOL_RE = re.compile(r"^[A-Z]{1,5}$")  # Equity symbols: 1-5 uppercase letters
+_SYMBOL_RE = re.compile(r"[A-Z]{1,5}")  # Equity symbols: 1-5 uppercase letters
 
 
 def _validate_equity_symbol(symbol: str) -> str:
     """Validate symbol is a valid US equity ticker."""
-    if not _SYMBOL_RE.match(symbol):
+    if not _SYMBOL_RE.fullmatch(symbol):
         raise ValueError(
             f"Invalid equity symbol format: {symbol!r}. "
             "Must be 1-5 uppercase letters (e.g., AAPL, MSFT, SPY)"
@@ -118,7 +119,7 @@ class EquityKdbLoader:
             host=self.config.host,
             port=target_port,
             username=self.config.username,
-            password=self.config.password,
+            password=self.config.password.get_secret_value(),
             timeout=self.config.timeout / 1000.0,
         )
         self._resilient_conn.connect()
@@ -166,6 +167,7 @@ class EquityKdbLoader:
             DataFrame with columns: timestamp, open, high, low, close, volume, vwap, trade_count
         """
         _validate_equity_symbol(symbol)
+        q_choice(timeframe, TIMEFRAMES, "timeframe")
 
         # Convert date strings to q date format (YYYY.MM.DD)
         start_dt = datetime.fromisoformat(start)

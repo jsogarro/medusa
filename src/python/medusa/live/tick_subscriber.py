@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 from loguru import logger
 
+from medusa.data.q_safe import q_ident
 from medusa.utils.config import get_settings
 
 
@@ -49,12 +50,16 @@ class TickSubscriber:
             table: Table name (e.g. 'marketData', 'tradeEvent').
             symbols: Symbols to subscribe (None = all).
         """
+        table = q_ident(table, "table")
+        syms = [q_ident(s, "symbol") for s in symbols or []]
+
         if self._conn is None:
             self.connect()
 
-        if symbols:
-            sym_str = "`" + "` `".join(symbols)
-            self._conn(f".u.sub[`{table}; `{sym_str}]")
+        if len(syms) == 1:
+            self._conn(f".u.sub[`{table}; enlist`{syms[0]}]")
+        elif syms:
+            self._conn(f".u.sub[`{table}; `{'`'.join(syms)}]")
         else:
             self._conn(f".u.sub[`{table}; `]")
 

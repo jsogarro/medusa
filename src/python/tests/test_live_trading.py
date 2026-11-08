@@ -228,20 +228,18 @@ class TestOrderPublisher:
         publisher = OrderPublisher(tp_host="localhost", tp_port=5010)
         publisher.connect()
 
-        # Currently no validation in OrderPublisher — this documents expected behavior
-        # If validation is added, this test should expect a ValueError
-        symbol = "BTC/USD"  # Invalid: contains '/'
-        # For now, this will not raise (just documents the gap)
-        publisher.publish_order(
-            order_id=1,
-            exchange="coinbase",
-            symbol=symbol,
-            side="buy",
-            order_type="market",
-            price=50000_000000,
-            volume=1_000000,
-            actor="test",
-        )
+        with pytest.raises(ValueError):
+            publisher.publish_order(
+                order_id=1,
+                exchange="coinbase",
+                symbol="BTC/USD",  # Invalid: contains '/'
+                side="buy",
+                order_type="market",
+                price=50000_000000,
+                volume=1_000000,
+                actor="test",
+            )
+        mock_conn.assert_not_called()
 
     @patch("pykx.QConnection")
     def test_context_manager(self, mock_qconnection):
@@ -313,8 +311,7 @@ class TestTickSubscriber:
         subscriber.connect()
         subscriber.subscribe("marketData", symbols=None)
 
-        # Should execute .u.sub with backtick for all symbols
-        mock_conn.assert_called()
+        mock_conn.assert_called_once_with(".u.sub[`marketData; `]")
 
     @patch("pykx.QConnection")
     def test_subscribe_specific_symbols(self, mock_qconnection):
@@ -328,7 +325,7 @@ class TestTickSubscriber:
         subscriber.connect()
         subscriber.subscribe("marketData", symbols=["BTCUSD", "ETHUSD"])
 
-        mock_conn.assert_called()
+        mock_conn.assert_called_once_with(".u.sub[`marketData; `BTCUSD`ETHUSD]")
 
     def test_register_handler(self):
         """Test register callback handler."""

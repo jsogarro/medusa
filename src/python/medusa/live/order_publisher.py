@@ -7,6 +7,7 @@ from typing import Any
 
 from loguru import logger
 
+from medusa.data.q_safe import ORDER_TYPES, SIDES, q_choice, q_ident, q_long
 from medusa.utils.config import get_settings
 
 
@@ -58,6 +59,15 @@ class OrderPublisher:
             volume: Volume in fixed-precision long format.
             actor: Strategy name submitting the order.
         """
+        order_id = q_long(order_id, "order_id")
+        price = q_long(price, "price")
+        volume = q_long(volume, "volume")
+        exchange = q_ident(exchange, "exchange")
+        symbol = q_ident(symbol, "symbol")
+        actor = q_ident(actor, "actor")
+        side = q_choice(side, SIDES, "side")
+        order_type = q_choice(order_type, ORDER_TYPES, "order_type")
+
         if self._conn is None:
             self.connect()
 

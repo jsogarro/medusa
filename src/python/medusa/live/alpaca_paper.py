@@ -23,6 +23,22 @@ except ImportError:
     logger.warning("alpaca-py trading module not installed - AlpacaPaperClient unavailable")
 
 
+def _normalize_side(side: str) -> str:
+    side = side.lower()
+    if side not in ("buy", "sell"):
+        raise ValueError(f"Unsupported side: {side!r}. Use 'buy' or 'sell'")
+    return side
+
+
+_PERIODS = ("1D", "1W", "1M", "3M", "1Y", "all")
+
+
+def _normalize_period(period: str) -> str:
+    if period not in _PERIODS:
+        raise ValueError(f"Unsupported period: {period!r}. Use one of: {list(_PERIODS)}")
+    return period
+
+
 class AlpacaPaperClient:
     """Alpaca paper trading client for strategy validation."""
 
@@ -82,7 +98,7 @@ class AlpacaPaperClient:
             Dictionary with order details (id, status, filled_qty, etc.)
         """
         # Map strings to enums
-        side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+        side_enum = OrderSide.BUY if _normalize_side(side) == "buy" else OrderSide.SELL
         tif_map = {
             "day": TimeInForce.DAY,
             "gtc": TimeInForce.GTC,
@@ -233,11 +249,11 @@ class AlpacaPaperClient:
             "1W": PortfolioHistoryPeriod.WEEK_1,
             "1M": PortfolioHistoryPeriod.MONTH_1,
             "3M": PortfolioHistoryPeriod.MONTH_3,
-            "1A": PortfolioHistoryPeriod.YEAR_1,
+            "1Y": PortfolioHistoryPeriod.YEAR_1,
             "all": PortfolioHistoryPeriod.ALL,
         }
 
-        period_enum = period_map.get(period, PortfolioHistoryPeriod.MONTH_1)
+        period_enum = period_map[_normalize_period(period)]
 
         history = self.client.get_portfolio_history(
             period=period_enum,
