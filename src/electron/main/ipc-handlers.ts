@@ -1,29 +1,35 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain, BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { KdbClient } from './kdb-client'
 import { IpcRateLimiter } from './ipc-rate-limiter'
+import { isTrustedSender } from './security'
+import { fixedLong, sym } from './q-types'
+import {
+  KdbEndpoint,
+  parseRiskVerdict,
+  validateKdbConfig,
+  validateOrder,
+  validateSymbol
+} from './validation'
+
+type KdbConfig = { tp: KdbEndpoint; rdb: KdbEndpoint }
 
 let tpClient: KdbClient | null = null
 let rdbClient: KdbClient | null = null
+let currentConfig: KdbConfig | null = null
 let removeTpUpdateForwarder: (() => void) | null = null
 
-// Initialize rate limiter (100 tokens capacity, 10 tokens/sec refill)
-const rateLimiter = new IpcRateLimiter(100, 10)
-
-// Input sanitization: only allow alphanumeric + underscore for symbols
-const SAFE_SYMBOL = /^[A-Za-z0-9_]+$/
-const SAFE_TABLE = /^[a-z][a-zA-Z0-9_.]*$/
-const MAX_STRING_LENGTH = 256  // Limit to prevent payload bloat
-const MAX_PAYLOAD_SIZE = 10 * 1024  // 10KB max payload (JSON stringified)
-
-function validateSymbol(value: string, fieldName: string): string {
-  if (typeof value !== 'string' || !SAFE_SYMBOL.test(value)) {
-    throw new Error(`Invalid ${fieldName}: "${value}" — only alphanumeric and underscore allowed`)
-  }
-  if (value.length > MAX_STRING_LENGTH) {
-    throw new Error(`Invalid ${fieldName}: exceeds max length of ${MAX_STRING_LENGTH}`)
-  }
-  return value
+// Default budget, plus tighter per-channel budgets for state-changing calls.
+function createRateLimiter(): IpcRateLimiter {
+  return new IpcRateLimiter(100, 10, {
+    'kdb:placeOrder': { capacity: 10, refillRate: 2 },
+    'kdb:cancelOrder': { capacity: 20, refillRate: 5 },
+    'kdb:strategyControl': { capacity: 20, refillRate: 5 },
+    'kdb:connect': { capacity: 5, refillRate: 0.5 }
+  })
 }
+
+const SAFE_TABLE = /^[a-z][a-zA-Z0-9_.]*$/
+const MAX_PAYLOAD_SIZE = 10 * 1024  // 10KB max payload (JSON stringified)
 
 function validatePayloadSize(obj: unknown): void {
   const serialized = JSON.stringify(obj)
@@ -32,51 +38,51 @@ function validatePayloadSize(obj: unknown): void {
   }
 }
 
-function validateNumber(value: unknown, fieldName: string): number {
-  const num = Number(value)
-  if (!Number.isFinite(num) || num < 0) {
-    throw new Error(`Invalid ${fieldName}: must be a non-negative finite number, got ${value}`)
-  }
-  return num
+function sameEndpoint(a: KdbEndpoint, b: KdbEndpoint): boolean {
+  return a.host === b.host && a.port === b.port
 }
 
-interface PlaceOrderRequest {
-  exchange: string
-  pair: string
-  side: 'buy' | 'sell'
-  orderType: 'market' | 'limit' | 'stop'
-  price: number
-  quantity: number
-  strategy: string
-}
-
-function validateOrder(obj: unknown): PlaceOrderRequest {
-  if (typeof obj !== 'object' || obj === null) {
-    throw new Error('Invalid order: expected an object')
-  }
-  const o = obj as Record<string, unknown>
-  const exchange = validateSymbol(String(o.exchange ?? ''), 'exchange')
-  const pair = validateSymbol(String(o.pair ?? ''), 'pair')
-  const strategy = validateSymbol(String(o.strategy ?? ''), 'strategy')
-  const side = String(o.side ?? '')
-  if (side !== 'buy' && side !== 'sell') {
-    throw new Error(`Invalid side: "${side}" — must be "buy" or "sell"`)
-  }
-  const orderType = String(o.orderType ?? '')
-  if (!['market', 'limit', 'stop'].includes(orderType)) {
-    throw new Error(`Invalid orderType: "${orderType}" — must be market, limit, or stop`)
-  }
-  const price = validateNumber(o.price, 'price')
-  const quantity = validateNumber(o.quantity, 'quantity')
-  if (quantity <= 0) {
-    throw new Error('Invalid quantity: must be greater than 0')
-  }
-  return { exchange, pair, side: side as 'buy' | 'sell', orderType: orderType as 'market' | 'limit' | 'stop', price, quantity, strategy }
+/**
+ * Register an IPC handler that only serves the app's own renderer, converts thrown
+ * errors into { success: false }, and can be registered again (macOS re-activate).
+ */
+function handle(channel: string, fn: (event: IpcMainInvokeEvent, ...args: any[]) => unknown): void {
+  ipcMain.removeHandler(channel)
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      if (!isTrustedSender(event as never)) {
+        throw new Error('Untrusted sender')
+      }
+      return await fn(event, ...args)
+    } catch (error: any) {
+      return { success: false, error: error.message }
+    }
+  })
 }
 
 export function setupIpcHandlers(mainWindow: BrowserWindow): void {
-  // Connect to kdb+ (TP and RDB)
-  ipcMain.handle('kdb:connect', async (_event, config: { tp: { host: string; port: number }; rdb: { host: string; port: number } }) => {
+  const rateLimiter = createRateLimiter()
+  const limit = (channel: string) => {
+    if (!rateLimiter.checkLimit(channel)) {
+      throw new Error('Rate limit exceeded — too many requests. Please slow down.')
+    }
+  }
+
+  // Connect to kdb+ (TP and RDB). Idempotent for an unchanged config so a second
+  // window cannot tear down the link the first one is using.
+  handle('kdb:connect', async (_event, rawConfig: unknown) => {
+    const config = validateKdbConfig(rawConfig)
+    if (
+      currentConfig &&
+      tpClient?.isConnected() &&
+      rdbClient?.isConnected() &&
+      sameEndpoint(currentConfig.tp, config.tp) &&
+      sameEndpoint(currentConfig.rdb, config.rdb)
+    ) {
+      return { success: true }
+    }
+    limit('kdb:connect')
+
     try {
       await disconnectClients()
 
@@ -87,188 +93,127 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       rdbClient = new KdbClient(config.rdb)
       await rdbClient.connect()
 
+      currentConfig = config
       return { success: true }
-    } catch (error: any) {
+    } catch (error) {
       await disconnectClients()
-      return { success: false, error: error.message }
+      throw error
     }
   })
 
   // Subscribe to table updates (validated table name)
-  ipcMain.handle('kdb:subscribe', async (_event, table: string) => {
-    try {
-      if (!tpClient) {
-        throw new Error('Not connected to TP')
-      }
-      if (typeof table !== 'string' || !SAFE_TABLE.test(table)) {
-        throw new Error(`Invalid table name: "${table}"`)
-      }
-      await tpClient.subscribe(table)
-      return { success: true }
-    } catch (error: any) {
-      return { success: false, error: error.message }
+  handle('kdb:subscribe', async (_event, table: string) => {
+    if (!tpClient) {
+      throw new Error('Not connected to TP')
     }
+    if (typeof table !== 'string' || !SAFE_TABLE.test(table)) {
+      throw new Error(`Invalid table name: "${table}"`)
+    }
+    await tpClient.subscribe(table)
+    return { success: true }
   })
 
   // Named query operations — NO raw q expression passthrough
-  // Each operation is a pre-defined function with validated parameters
-  ipcMain.handle('kdb:cancelOrder', async (_event, orderId: string) => {
-    try {
-      // Rate limit check
-      if (!rateLimiter.checkLimit('kdb:cancelOrder')) {
-        throw new Error('Rate limit exceeded — too many requests. Please slow down.')
-      }
-
-      if (!rdbClient) throw new Error('Not connected to RDB')
-      validateSymbol(orderId, 'orderId')
-      const result = await rdbClient.query(`.engine.order.cancel`, [orderId])
-      return { success: true, data: result }
-    } catch (error: any) {
-      return { success: false, error: error.message }
-    }
+  handle('kdb:cancelOrder', async (_event, orderId: string, exchange: string) => {
+    if (!rdbClient) throw new Error('Not connected to RDB')
+    validateSymbol(orderId, 'orderId')
+    validateSymbol(exchange, 'exchange')
+    limit('kdb:cancelOrder')
+    const result = await rdbClient.query('.exchange.coordinator.cancelOrder', [sym(exchange), sym(orderId)])
+    return { success: true, data: result }
   })
 
-  ipcMain.handle('kdb:getOrders', async (_event) => {
-    try {
-      if (!rdbClient) throw new Error('Not connected to RDB')
-      const result = await rdbClient.query(`select from orders`)
-      return { success: true, data: result }
-    } catch (error: any) {
-      return { success: false, error: error.message }
-    }
+  handle('kdb:getOrders', async () => {
+    if (!rdbClient) throw new Error('Not connected to RDB')
+    return { success: true, data: await rdbClient.query(`select from orders`) }
   })
 
-  ipcMain.handle('kdb:getPositions', async (_event) => {
-    try {
-      if (!rdbClient) throw new Error('Not connected to RDB')
-      const result = await rdbClient.query(`select from positions`)
-      return { success: true, data: result }
-    } catch (error: any) {
-      return { success: false, error: error.message }
-    }
+  handle('kdb:getPositions', async () => {
+    if (!rdbClient) throw new Error('Not connected to RDB')
+    return { success: true, data: await rdbClient.query(`select from positions`) }
   })
 
-  ipcMain.handle('kdb:getRiskMetrics', async (_event) => {
-    try {
-      if (!rdbClient) throw new Error('Not connected to RDB')
-      const result = await rdbClient.query(`.risk.getStatus[]`)
-      return { success: true, data: result }
-    } catch (error: any) {
-      return { success: false, error: error.message }
-    }
+  // No q-side implementation exists for these yet; fail explicitly rather than call a missing function.
+  handle('kdb:getRiskMetrics', async () => {
+    throw new Error('not implemented')
   })
 
-  ipcMain.handle('kdb:emergencyStop', async (_event) => {
-    try {
-      if (!rdbClient) throw new Error('Not connected to RDB')
-      const result = await rdbClient.query(`.risk.activateEmergencyStop[\`manual;\`ui]`)
-      return { success: true, data: result }
-    } catch (error: any) {
-      return { success: false, error: error.message }
-    }
+  handle('kdb:getCandles', async () => {
+    throw new Error('not implemented')
   })
 
-  ipcMain.handle('kdb:strategyControl', async (_event, name: string, action: string) => {
-    try {
-      if (!rdbClient) throw new Error('Not connected to RDB')
-      validateSymbol(name, 'strategy name')
-      if (!['pause', 'resume', 'stop'].includes(action)) {
-        throw new Error(`Invalid action: "${action}" — must be pause, resume, or stop`)
-      }
-      const funcMap: Record<string, string> = {
-        pause: '.engine.strategy.pause',
-        resume: '.engine.strategy.resume',
-        stop: '.engine.strategy.stop',
-      }
-      const result = await rdbClient.query(funcMap[action], [name])
-      return { success: true, data: result }
-    } catch (error: any) {
-      return { success: false, error: error.message }
-    }
+  handle('kdb:emergencyStop', async () => {
+    if (!rdbClient) throw new Error('Not connected to RDB')
+    const result = await rdbClient.query(`.risk.activateEmergencyStop[\`manual;\`ui]`)
+    return { success: true, data: result }
   })
 
-  ipcMain.handle('kdb:getCandles', async (_event, exchange: string, pair: string, timeframe: string) => {
-    try {
-      if (!rdbClient) throw new Error('Not connected to RDB')
-      validateSymbol(exchange, 'exchange')
-      validateSymbol(pair, 'pair')
-      validateSymbol(timeframe, 'timeframe')
-      // Use parameterized query — no string interpolation of user input
-      const result = await rdbClient.query(`.medusa.getCandles`, [exchange, pair, timeframe])
-      return { success: true, data: result }
-    } catch (error: any) {
-      return { success: false, error: error.message }
+  handle('kdb:strategyControl', async (_event, name: string, action: string) => {
+    if (!rdbClient) throw new Error('Not connected to RDB')
+    validateSymbol(name, 'strategy name')
+    if (!['pause', 'resume', 'stop'].includes(action)) {
+      throw new Error(`Invalid action: "${action}" — must be pause, resume, or stop`)
     }
+    limit('kdb:strategyControl')
+    const funcMap: Record<string, string> = {
+      pause: '.engine.strategy.pause',
+      resume: '.engine.strategy.resume',
+      stop: '.engine.strategy.stop',
+    }
+    const result = await rdbClient.query(funcMap[action], [sym(name)])
+    return { success: true, data: result }
   })
 
-  // Place order (validates via risk module first)
-  ipcMain.handle('kdb:placeOrder', async (_event, orderData: unknown) => {
-    try {
-      // Rate limit check (FIRST — before any processing)
-      if (!rateLimiter.checkLimit('kdb:placeOrder')) {
-        throw new Error('Rate limit exceeded — too many requests. Please slow down.')
-      }
+  // Place order: pre-trade risk check, then the exchange coordinator (dry-run, rate limits, routing).
+  handle('kdb:placeOrder', async (_event, orderData: unknown) => {
+    validatePayloadSize(orderData)
+    const order = validateOrder(orderData)
+    if (!rdbClient) throw new Error('Not connected to RDB')
+    limit('kdb:placeOrder')
 
-      if (!rdbClient) {
-        throw new Error('Not connected to RDB')
-      }
-
-      // Validate payload size first (prevent DoS via large payloads)
-      validatePayloadSize(orderData)
-
-      // Validate all order fields before touching kdb+
-      const order = validateOrder(orderData)
-
-      // Use parameterized function call — no string interpolation
-      const riskCheck = await rdbClient.query(`.risk.validateOrder`, [
-        order.strategy, order.pair, order.exchange, order.side, order.quantity, order.price
-      ])
-
-      if (!riskCheck) {
-        throw new Error('Order rejected by risk module')
-      }
-
-      // Call the actual exchange coordinator function
-      const orderId = await rdbClient.query(`.exchange.placeOrder`, [
-        order.exchange, order.pair, order.orderType, order.side, order.price, order.quantity
-      ])
-
-      return { success: true, data: { orderId } }
-    } catch (error: any) {
-      return { success: false, error: error.message }
+    const verdict = parseRiskVerdict(await rdbClient.query('.risk.validateOrder', [
+      sym(order.strategy), sym(order.pair), sym(order.exchange), sym(order.side),
+      fixedLong(order.quantity), fixedLong(order.price)
+    ]))
+    if (!verdict.ok) {
+      throw new Error(`Order rejected by risk module: ${verdict.reason}`)
     }
+
+    const result = await rdbClient.query('.exchange.coordinator.placeOrder', [
+      sym(order.exchange), sym(order.pair), sym(order.orderType), sym(order.side),
+      fixedLong(order.price), fixedLong(order.quantity)
+    ])
+    if (typeof result !== 'object' || result === null || typeof (result as any).orderId !== 'string') {
+      throw new Error('Order placement returned no order id')
+    }
+    const { orderId, status } = result as { orderId: string; status?: string }
+    return { success: true, data: { orderId, status } }
   })
 
-  // Setup kdb+ update forwarding
+  // Setup kdb+ update forwarding (re-points an existing TP client at this window)
   setupKdbUpdates(mainWindow)
 
   // Health check endpoint
-  ipcMain.handle('system:health', async (_event) => {
-    try {
-      return {
-        success: true,
-        data: {
-          timestamp: new Date().toISOString(),
-          kdb: {
-            tp: tpClient?.isConnected() ?? false,
-            rdb: rdbClient?.isConnected() ?? false,
-          },
-          electron: {
-            version: process.versions.electron,
-            node: process.versions.node,
-            uptime: process.uptime(),
-            memory: process.memoryUsage(),
-          },
-          ui: {
-            screens: 25,
-            workspaceActive: true,
-          }
-        }
+  handle('system:health', async () => ({
+    success: true,
+    data: {
+      timestamp: new Date().toISOString(),
+      kdb: {
+        tp: tpClient?.isConnected() ?? false,
+        rdb: rdbClient?.isConnected() ?? false,
+      },
+      electron: {
+        version: process.versions.electron,
+        node: process.versions.node,
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+      },
+      ui: {
+        screens: 25,
+        workspaceActive: true,
       }
-    } catch (error: any) {
-      return { success: false, error: error.message }
     }
-  })
+  }))
 }
 
 function setupKdbUpdates(mainWindow: BrowserWindow): void {
@@ -300,6 +245,7 @@ async function disconnectClients(): Promise<void> {
   const currentRdbClient = rdbClient
   tpClient = null
   rdbClient = null
+  currentConfig = null
 
   await Promise.allSettled([
     currentTpClient?.disconnect(),

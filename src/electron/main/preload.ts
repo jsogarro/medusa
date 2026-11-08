@@ -5,7 +5,7 @@ export interface KdbApi {
   connect: (config: { tp: { host: string; port: number }; rdb: { host: string; port: number } }) => Promise<{ success: boolean; error?: string }>
   subscribe: (table: string) => Promise<{ success: boolean; error?: string }>
   placeOrder: (order: any) => Promise<{ success: boolean; data?: any; error?: string }>
-  cancelOrder: (orderId: string) => Promise<{ success: boolean; data?: any; error?: string }>
+  cancelOrder: (orderId: string, exchange: string) => Promise<{ success: boolean; data?: any; error?: string }>
   getOrders: () => Promise<{ success: boolean; data?: any; error?: string }>
   getPositions: () => Promise<{ success: boolean; data?: any; error?: string }>
   getRiskMetrics: () => Promise<{ success: boolean; data?: any; error?: string }>
@@ -30,7 +30,7 @@ contextBridge.exposeInMainWorld('kdb', {
   connect: (config) => ipcRenderer.invoke('kdb:connect', config),
   subscribe: (table) => ipcRenderer.invoke('kdb:subscribe', table),
   placeOrder: (order) => ipcRenderer.invoke('kdb:placeOrder', order),
-  cancelOrder: (orderId) => ipcRenderer.invoke('kdb:cancelOrder', orderId),
+  cancelOrder: (orderId, exchange) => ipcRenderer.invoke('kdb:cancelOrder', orderId, exchange),
   getOrders: () => ipcRenderer.invoke('kdb:getOrders'),
   getPositions: () => ipcRenderer.invoke('kdb:getPositions'),
   getRiskMetrics: () => ipcRenderer.invoke('kdb:getRiskMetrics'),
