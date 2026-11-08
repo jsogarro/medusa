@@ -31,8 +31,8 @@ class VectorBTEngine:
 
         # Asset-class specific defaults
         if asset_class == "equity":
-            # Alpaca: $0 commission for stocks
-            self.commission = 0.0
+            # Alpaca: $0 commission for stocks unless explicitly overridden
+            self.commission = commission if commission is not None else 0.0
             # Equity slippage model: ~2 basis points
             self.slippage = slippage if slippage is not None else 0.0002
         else:
@@ -108,6 +108,11 @@ class VectorBTEngine:
             vbt.Portfolio object with results.
         """
         import vectorbt as vbt
+
+        # A signal computed from bar t's close cannot fill at bar t's close:
+        # act on the next bar (fills at that bar's close).
+        entries = entries.shift(1, fill_value=False)
+        exits = exits.shift(1, fill_value=False)
 
         # Filter signals by market hours (equity only)
         if self.asset_class == "equity":

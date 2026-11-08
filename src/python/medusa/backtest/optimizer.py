@@ -27,6 +27,25 @@ except ImportError:
 from medusa.backtest.vectorbt_engine import VectorBTEngine
 
 
+def _strategy_metric(pf: Any, metric: str) -> float:
+    """Extract a "higher is better" metric from a portfolio.
+
+    max_drawdown is returned as -|drawdown| (0 is best) regardless of the sign
+    convention of the backtest library.
+    """
+    extractors = {
+        "sharpe_ratio": lambda p: p.sharpe_ratio(),
+        "total_return": lambda p: p.total_return(),
+        "sortino_ratio": lambda p: p.sortino_ratio(),
+        "calmar_ratio": lambda p: p.calmar_ratio(),
+        "max_drawdown": lambda p: -abs(p.max_drawdown()),
+    }
+    extractor = extractors.get(metric)
+    if extractor is None:
+        raise ValueError(f"Unknown metric: {metric}")
+    return float(extractor(pf))
+
+
 class OptunaOptimizer:
     """Bayesian optimization for strategy and model hyperparameters using Optuna.
 
@@ -70,7 +89,7 @@ class OptunaOptimizer:
         self.engine = engine
         self.n_trials = n_trials
         self.study_name = study_name
-        self.storage = storage or "sqlite:///optuna_medusa.db"
+        self.storage = storage
 
         # Select sampler
         if sampler == "tpe":
@@ -140,25 +159,13 @@ class OptunaOptimizer:
                 entries, exits = signal_func(price, **params)
                 pf = self.engine.run_signals(price, entries, exits)
 
-                # Extract metric
-                metric_extractors = {
-                    "sharpe_ratio": lambda p: p.sharpe_ratio(),
-                    "total_return": lambda p: p.total_return(),
-                    "sortino_ratio": lambda p: p.sortino_ratio(),
-                    "calmar_ratio": lambda p: p.calmar_ratio(),
-                    "max_drawdown": lambda p: -p.max_drawdown(),  # Negative for minimization
-                }
-                extractor = metric_extractors.get(metric)
-                if extractor is None:
-                    raise ValueError(f"Unknown metric: {metric}")
-
-                value = extractor(pf)
+                value = _strategy_metric(pf, metric)
 
                 # Handle NaN/inf
                 if np.isnan(value) or np.isinf(value):
                     raise optuna.TrialPruned()
 
-                return float(value)
+                return value
 
             except Exception as e:
                 logger.warning(f"Trial failed with params {params}: {e}")

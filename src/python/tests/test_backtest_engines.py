@@ -24,7 +24,7 @@ def equity_price_series():
     """Generate equity price series with DatetimeIndex (for market hours filtering)."""
     np.random.seed(42)
     # 5 days of intraday data (hourly bars)
-    dates = pd.date_range("2024-01-02 09:30", periods=5 * 7, freq="H", tz="US/Eastern")
+    dates = pd.date_range("2024-01-02 09:30", periods=5 * 7, freq="h", tz="US/Eastern")
     prices = pd.Series(100 + np.cumsum(np.random.randn(len(dates)) * 0.5), index=dates)
     return prices
 
