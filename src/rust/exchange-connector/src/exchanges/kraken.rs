@@ -99,6 +99,41 @@ impl KrakenClient {
         Ok(signature)
     }
 
+    /// Build the `AddOrder` form fields (without signature).
+    fn build_order_form(
+        order: &Order,
+        nonce: u64,
+    ) -> Result<Vec<(&'static str, String)>, ExchangeError> {
+        let order_type = match order.order_type {
+            OrderType::Limit => "limit",
+            OrderType::Market => "market",
+            _ => {
+                return Err(ExchangeError::InvalidRequest(
+                    "Unsupported order type".into(),
+                ))
+            }
+        };
+        let side = match order.side {
+            Side::Buy => "buy",
+            Side::Sell => "sell",
+        };
+
+        let mut form = vec![
+            ("nonce", nonce.to_string()),
+            ("ordertype", order_type.to_string()),
+            ("type", side.to_string()),
+            ("pair", Self::normalize_pair(&order.pair)),
+            ("volume", order.quantity.to_string()),
+        ];
+        if let Some(price) = order.price {
+            form.push(("price", price.to_string()));
+        }
+        if let Some(id) = &order.client_order_id {
+            form.push(("cl_ord_id", id.clone()));
+        }
+        Ok(form)
+    }
+
     /// Get current nonce with microsecond precision and uniqueness guarantee
     ///
     /// # Security
@@ -469,35 +504,17 @@ impl ExchangeClient for KrakenClient {
         crate::client::validate_order(order)?;
         let path = "/0/private/AddOrder";
         let url = format!("{}{}", BASE_URL, path);
+
+        // Wait for the limiter before minting the nonce that gets signed, so
+        // nonces reach Kraken in the order they were issued.
+        debug!(
+            "Placing Kraken order: {:?} {} {} @ {:?}",
+            order.side, order.quantity, order.pair, order.price
+        );
+        self.rate_limiter.acquire(Some("/AddOrder"), 1).await;
+
         let nonce = Self::get_nonce();
-
-        let order_type = match order.order_type {
-            OrderType::Limit => "limit",
-            OrderType::Market => "market",
-            _ => {
-                return Err(ExchangeError::InvalidRequest(
-                    "Unsupported order type".into(),
-                ))
-            }
-        };
-
-        let side = match order.side {
-            Side::Buy => "buy",
-            Side::Sell => "sell",
-        };
-
-        let mut form_data = vec![
-            ("nonce", nonce.to_string()),
-            ("ordertype", order_type.to_string()),
-            ("type", side.to_string()),
-            ("pair", Self::normalize_pair(&order.pair)),
-            ("volume", order.quantity.to_string()),
-        ];
-
-        if let Some(price) = order.price {
-            form_data.push(("price", price.to_string()));
-        }
-
+        let form_data = Self::build_order_form(order, nonce)?;
         let postdata = form_data
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
@@ -505,12 +522,6 @@ impl ExchangeClient for KrakenClient {
             .join("&");
 
         let signature = self.generate_signature(path, nonce, &postdata)?;
-
-        debug!(
-            "Placing Kraken order: {:?} {} {} @ {:?}",
-            order.side, order.quantity, order.pair, order.price
-        );
-        self.rate_limiter.acquire(Some("/AddOrder"), 1).await;
 
         let response = self
             .client
@@ -629,5 +640,30 @@ mod tests {
     async fn place_order_rejects_invalid_orders_kraken() {
         let client = KrakenClient::new("k".into(), "c2VjcmV0".into());
         crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
+
+    fn find<'a>(p: &'a [(&'static str, String)], k: &str) -> Option<&'a str> {
+        p.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn build_order_form_carries_client_order_id() {
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            side: Side::Sell,
+            ..crate::client::tests::sample_order()
+        };
+        let f = KrakenClient::build_order_form(&order, 77).unwrap();
+        assert_eq!(find(&f, "cl_ord_id"), Some("my-id-1"));
+        assert_eq!(find(&f, "type"), Some("sell"));
+        assert_eq!(find(&f, "ordertype"), Some("limit"));
+        assert_eq!(find(&f, "volume"), Some("1"));
+        assert_eq!(find(&f, "nonce"), Some("77"));
+    }
+
+    #[test]
+    fn build_order_form_without_client_id_omits_field() {
+        let f = KrakenClient::build_order_form(&crate::client::tests::sample_order(), 1).unwrap();
+        assert_eq!(find(&f, "cl_ord_id"), None);
     }
 }

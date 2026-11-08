@@ -42,6 +42,17 @@ pub(crate) fn validate_order(order: &Order) -> Result<(), ExchangeError> {
     if !q.is_finite() || !(MIN_POSITIVE..=MAX_QUANTITY).contains(&q) {
         return bad("quantity", q);
     }
+    if let Some(id) = &order.client_order_id {
+        let ok = (1..=36).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if !ok {
+            return Err(ExchangeError::InvalidRequest(
+                "client_order_id must be 1-36 chars of [A-Za-z0-9_-]".into(),
+            ));
+        }
+    }
     match order.price {
         Some(p) if !p.is_finite() || !(MIN_POSITIVE..=MAX_PRICE).contains(&p) => bad("price", p),
         None if order.order_type == OrderType::Limit => Err(ExchangeError::InvalidRequest(
@@ -203,6 +214,27 @@ pub(crate) mod tests {
             ..sample_order()
         };
         assert!(validate_order(&market).is_ok());
+    }
+
+    #[test]
+    fn validate_order_checks_client_order_id() {
+        for ok in ["a", "abc-123_X", &"x".repeat(36)] {
+            let o = Order {
+                client_order_id: Some(ok.to_string()),
+                ..sample_order()
+            };
+            assert!(validate_order(&o).is_ok(), "{ok}");
+        }
+        for bad in ["", "has space", "a&b=c", "semi;colon", &"x".repeat(37)] {
+            let o = Order {
+                client_order_id: Some(bad.to_string()),
+                ..sample_order()
+            };
+            assert!(
+                matches!(validate_order(&o), Err(ExchangeError::InvalidRequest(_))),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

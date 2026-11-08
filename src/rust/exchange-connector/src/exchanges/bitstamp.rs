@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::Sha256;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -80,6 +80,37 @@ impl BitstampClient {
         mac.update(signature_input.as_bytes());
         mac.update(message.as_bytes());
         hex::encode(mac.finalize().into_bytes()).to_uppercase()
+    }
+
+    /// Build the order endpoint and its (unauthenticated) form fields.
+    fn build_order_request(
+        order: &Order,
+    ) -> Result<(String, Vec<(&'static str, String)>), ExchangeError> {
+        let pair = Self::normalize_pair(&order.pair);
+        let endpoint = match (order.side, order.order_type) {
+            (Side::Buy, OrderType::Limit) => format!("/buy/{}/", pair),
+            (Side::Sell, OrderType::Limit) => format!("/sell/{}/", pair),
+            (Side::Buy, OrderType::Market) => format!("/buy/market/{}/", pair),
+            (Side::Sell, OrderType::Market) => format!("/sell/market/{}/", pair),
+            _ => {
+                return Err(ExchangeError::InvalidRequest(format!(
+                    "Unsupported order type: {:?}",
+                    order.order_type
+                )))
+            }
+        };
+
+        let mut fields = vec![("amount", order.quantity.to_string())];
+        if order.order_type == OrderType::Limit {
+            let price = order.price.ok_or_else(|| {
+                ExchangeError::InvalidRequest("Limit order requires price".into())
+            })?;
+            fields.push(("price", price.to_string()));
+        }
+        if let Some(id) = &order.client_order_id {
+            fields.push(("client_order_id", id.clone()));
+        }
+        Ok((endpoint, fields))
     }
 
     /// Get current nonce with microsecond precision and uniqueness guarantee
@@ -164,14 +195,6 @@ struct BitstampOrderBook {
 struct BitstampBalance {
     #[serde(flatten)]
     balances: std::collections::HashMap<String, String>,
-}
-
-#[derive(Debug, Serialize)]
-struct BitstampOrderRequest {
-    amount: String,
-    price: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    daily_order: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -409,47 +432,25 @@ impl ExchangeClient for BitstampClient {
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
         crate::client::validate_order(order)?;
-        let normalized_pair = Self::normalize_pair(&order.pair);
-        let endpoint = match (order.side, order.order_type) {
-            (Side::Buy, OrderType::Limit) => format!("/buy/{}/", normalized_pair),
-            (Side::Sell, OrderType::Limit) => format!("/sell/{}/", normalized_pair),
-            (Side::Buy, OrderType::Market) => format!("/buy/market/{}/", normalized_pair),
-            (Side::Sell, OrderType::Market) => format!("/sell/market/{}/", normalized_pair),
-            _ => {
-                return Err(ExchangeError::InvalidRequest(format!(
-                    "Unsupported order type: {:?}",
-                    order.order_type
-                )))
-            }
-        };
-
+        let (endpoint, order_fields) = Self::build_order_request(order)?;
         let url = format!("{}{}", BASE_URL, endpoint);
-        let nonce = Self::get_nonce();
-        let signature = self.generate_signature(nonce, "");
-
-        let request_body = BitstampOrderRequest {
-            amount: order.quantity.to_string(),
-            price: order.price.map(|p| p.to_string()),
-            daily_order: None,
-        };
 
         debug!(
             "Placing Bitstamp order: {:?} {} {} @ {:?}",
             order.side, order.quantity, order.pair, order.price
         );
+        // Wait for the limiter before minting the nonce that gets signed.
         self.rate_limiter.acquire(Some(&endpoint), 1).await;
 
+        let nonce = Self::get_nonce();
+        let signature = self.generate_signature(nonce, "");
         let nonce_str = nonce.to_string();
         let mut form_data = vec![
-            ("key", self.api_key.as_str()),
-            ("signature", &signature),
-            ("nonce", &nonce_str),
-            ("amount", &request_body.amount),
+            ("key", self.api_key.clone()),
+            ("signature", signature),
+            ("nonce", nonce_str),
         ];
-
-        if let Some(ref price) = request_body.price {
-            form_data.push(("price", price));
-        }
+        form_data.extend(order_fields);
 
         let response = self.client.post(&url).form(&form_data).send().await?;
 
@@ -573,5 +574,35 @@ mod tests {
     async fn place_order_rejects_invalid_orders_bitstamp() {
         let client = BitstampClient::new("k".into(), "s".into(), "c".into());
         crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
+
+    fn find<'a>(p: &'a [(&'static str, String)], k: &str) -> Option<&'a str> {
+        p.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn build_order_request_carries_client_order_id() {
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            ..crate::client::tests::sample_order()
+        };
+        let (endpoint, f) = BitstampClient::build_order_request(&order).unwrap();
+        assert_eq!(endpoint, "/buy/btcusd/");
+        assert_eq!(find(&f, "client_order_id"), Some("my-id-1"));
+        assert_eq!(find(&f, "amount"), Some("1"));
+        assert_eq!(find(&f, "price"), Some("50000"));
+    }
+
+    #[test]
+    fn build_order_request_market_has_no_price_or_client_id() {
+        let order = Order {
+            order_type: OrderType::Market,
+            side: Side::Sell,
+            ..crate::client::tests::sample_order()
+        };
+        let (endpoint, f) = BitstampClient::build_order_request(&order).unwrap();
+        assert_eq!(endpoint, "/sell/market/btcusd/");
+        assert_eq!(find(&f, "price"), None);
+        assert_eq!(find(&f, "client_order_id"), None);
     }
 }

@@ -497,30 +497,7 @@ impl ExchangeClient for AlpacaClient {
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
         crate::client::validate_order(order)?;
-        let req = OrderRequest {
-            symbol: order.pair.clone(),
-            qty: Some(order.quantity.to_string()),
-            notional: None,
-            side: match order.side {
-                Side::Buy => "buy".to_string(),
-                Side::Sell => "sell".to_string(),
-            },
-            order_type: match order.order_type {
-                OrderType::Market => "market".to_string(),
-                OrderType::Limit => "limit".to_string(),
-                _ => {
-                    return Err(ExchangeError::InvalidRequest(
-                        "Unsupported order type for Alpaca".to_string(),
-                    ))
-                }
-            },
-            time_in_force: "day".to_string(),
-            limit_price: order.price.map(|p| p.to_string()),
-            stop_price: None,
-            extended_hours: Some(false),
-            client_order_id: order.client_order_id.clone(),
-        };
-
+        let req = Self::build_order_request(order)?;
         let alpaca_order = self.submit_order(req).await?;
         Ok(alpaca_order.id)
     }
@@ -542,6 +519,35 @@ impl ExchangeClient for AlpacaClient {
         }
 
         Ok(cancelled_count)
+    }
+}
+
+impl AlpacaClient {
+    /// Build the `POST /v2/orders` body.
+    fn build_order_request(order: &Order) -> Result<OrderRequest, ExchangeError> {
+        Ok(OrderRequest {
+            symbol: order.pair.clone(),
+            qty: Some(order.quantity.to_string()),
+            notional: None,
+            side: match order.side {
+                Side::Buy => "buy".to_string(),
+                Side::Sell => "sell".to_string(),
+            },
+            order_type: match order.order_type {
+                OrderType::Market => "market".to_string(),
+                OrderType::Limit => "limit".to_string(),
+                _ => {
+                    return Err(ExchangeError::InvalidRequest(
+                        "Unsupported order type for Alpaca".to_string(),
+                    ))
+                }
+            },
+            time_in_force: "day".to_string(),
+            limit_price: order.price.map(|p| p.to_string()),
+            stop_price: None,
+            extended_hours: Some(false),
+            client_order_id: order.client_order_id.clone(),
+        })
     }
 }
 
@@ -637,5 +643,16 @@ mod tests {
     async fn place_order_rejects_invalid_orders_alpaca() {
         let client = AlpacaClient::new("k".into(), "s".into(), true);
         crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
+
+    #[test]
+    fn build_order_request_forwards_client_order_id() {
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            ..crate::client::tests::sample_order()
+        };
+        let req = AlpacaClient::build_order_request(&order).unwrap();
+        assert_eq!(req.client_order_id.as_deref(), Some("my-id-1"));
+        assert_eq!(req.limit_price.as_deref(), Some("50000"));
     }
 }

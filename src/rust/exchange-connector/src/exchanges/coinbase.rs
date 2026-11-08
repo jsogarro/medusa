@@ -163,6 +163,80 @@ impl CoinbaseClient {
         }
     }
 
+    /// Build the Advanced Trade create-order body. Coinbase deduplicates on
+    /// `client_order_id`, so the caller must supply a stable one: minting a
+    /// fresh id here would turn every retry of a timed-out request into a
+    /// second order.
+    fn build_advanced_order_request(
+        order: &Order,
+    ) -> Result<AdvancedTradeOrderRequest, ExchangeError> {
+        let client_order_id = order.client_order_id.clone().ok_or_else(|| {
+            ExchangeError::InvalidRequest(
+                "client_order_id is required so retries cannot duplicate the order".into(),
+            )
+        })?;
+
+        let order_configuration = match order.order_type {
+            OrderType::Limit => {
+                let price = order.price.ok_or_else(|| {
+                    ExchangeError::InvalidRequest("Limit order requires price".into())
+                })?;
+                AdvancedTradeOrderConfig::Limit {
+                    limit_limit_gtc: AdvancedTradeLimitGTC {
+                        base_size: order.quantity.to_string(),
+                        limit_price: price.to_string(),
+                        post_only: false,
+                    },
+                }
+            }
+            OrderType::Market => AdvancedTradeOrderConfig::Market {
+                market_market_ioc: AdvancedTradeMarketIOC {
+                    base_size: Some(order.quantity.to_string()),
+                    quote_size: None,
+                },
+            },
+            _ => {
+                return Err(ExchangeError::InvalidRequest(
+                    "Unsupported order type".into(),
+                ))
+            }
+        };
+
+        Ok(AdvancedTradeOrderRequest {
+            client_order_id,
+            product_id: Self::normalize_pair(&order.pair),
+            side: match order.side {
+                Side::Buy => "BUY".to_string(),
+                Side::Sell => "SELL".to_string(),
+            },
+            order_configuration,
+        })
+    }
+
+    /// Build the legacy Exchange API create-order body.
+    fn build_legacy_order_request(order: &Order) -> Result<CoinbaseOrderRequest, ExchangeError> {
+        let order_type = match order.order_type {
+            OrderType::Limit => "limit",
+            OrderType::Market => "market",
+            _ => {
+                return Err(ExchangeError::InvalidRequest(
+                    "Unsupported order type".into(),
+                ))
+            }
+        };
+        Ok(CoinbaseOrderRequest {
+            client_oid: order.client_order_id.clone(),
+            order_type: order_type.to_string(),
+            side: match order.side {
+                Side::Buy => "buy".to_string(),
+                Side::Sell => "sell".to_string(),
+            },
+            product_id: Self::normalize_pair(&order.pair),
+            price: order.price.map(|p| p.to_string()),
+            size: Some(order.quantity.to_string()),
+        })
+    }
+
     fn advanced_key_name(&self) -> Result<String, ExchangeError> {
         let key_name = std::env::var("COINBASE_KEY_NAME")
             .ok()
@@ -1078,51 +1152,7 @@ impl ExchangeClient for CoinbaseClient {
             let path = "/api/v3/brokerage/orders";
             let url = format!("{}{}", self.base_url(), path);
 
-            let client_order_id = order.client_order_id.clone().unwrap_or_else(|| {
-                // Generate a random client order ID using timestamp + random nonce
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis();
-                let nonce: u64 = rand::thread_rng().gen();
-                format!("{}-{:x}", timestamp, nonce)
-            });
-
-            let order_configuration = match order.order_type {
-                OrderType::Limit => {
-                    let price = order.price.ok_or_else(|| {
-                        ExchangeError::InvalidRequest("Limit order requires price".into())
-                    })?;
-                    AdvancedTradeOrderConfig::Limit {
-                        limit_limit_gtc: AdvancedTradeLimitGTC {
-                            base_size: order.quantity.to_string(),
-                            limit_price: price.to_string(),
-                            post_only: false,
-                        },
-                    }
-                }
-                OrderType::Market => AdvancedTradeOrderConfig::Market {
-                    market_market_ioc: AdvancedTradeMarketIOC {
-                        base_size: Some(order.quantity.to_string()),
-                        quote_size: None,
-                    },
-                },
-                _ => {
-                    return Err(ExchangeError::InvalidRequest(
-                        "Unsupported order type".into(),
-                    ))
-                }
-            };
-
-            let request_body = AdvancedTradeOrderRequest {
-                client_order_id,
-                product_id: Self::normalize_pair(&order.pair),
-                side: match order.side {
-                    Side::Buy => "BUY".to_string(),
-                    Side::Sell => "SELL".to_string(),
-                },
-                order_configuration,
-            };
+            let request_body = Self::build_advanced_order_request(order)?;
 
             let body_json = serde_json::to_string(&request_body)?;
             let headers = self.generate_advanced_auth_headers("POST", path)?;
@@ -1165,27 +1195,7 @@ impl ExchangeClient for CoinbaseClient {
         let url = format!("{}{}", self.base_url(), path);
         let timestamp = Self::get_timestamp();
 
-        let order_type = match order.order_type {
-            OrderType::Limit => "limit",
-            OrderType::Market => "market",
-            _ => {
-                return Err(ExchangeError::InvalidRequest(
-                    "Unsupported order type".into(),
-                ))
-            }
-        };
-
-        let request_body = CoinbaseOrderRequest {
-            client_oid: order.client_order_id.clone(),
-            order_type: order_type.to_string(),
-            side: match order.side {
-                Side::Buy => "buy".to_string(),
-                Side::Sell => "sell".to_string(),
-            },
-            product_id: Self::normalize_pair(&order.pair),
-            price: order.price.map(|p| p.to_string()),
-            size: Some(order.quantity.to_string()),
-        };
+        let request_body = Self::build_legacy_order_request(order)?;
 
         let body_json = serde_json::to_string(&request_body)?;
         let (api_key, signature, ts, passphrase) =
@@ -1683,5 +1693,35 @@ mod tests {
     async fn place_order_rejects_invalid_orders_coinbase() {
         let client = CoinbaseClient::new("k".into(), "c2VjcmV0".into(), "p".into());
         crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
+
+    #[test]
+    fn advanced_order_requires_and_forwards_client_order_id() {
+        let none = crate::client::tests::sample_order();
+        assert!(matches!(
+            CoinbaseClient::build_advanced_order_request(&none),
+            Err(ExchangeError::InvalidRequest(_))
+        ));
+
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            ..none
+        };
+        let req = CoinbaseClient::build_advanced_order_request(&order).unwrap();
+        assert_eq!(req.client_order_id, "my-id-1");
+        // Same order built twice yields the same id (retry-safe).
+        let again = CoinbaseClient::build_advanced_order_request(&order).unwrap();
+        assert_eq!(req.client_order_id, again.client_order_id);
+    }
+
+    #[test]
+    fn legacy_order_forwards_client_oid() {
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            ..crate::client::tests::sample_order()
+        };
+        let req = CoinbaseClient::build_legacy_order_request(&order).unwrap();
+        assert_eq!(req.client_oid.as_deref(), Some("my-id-1"));
+        assert_eq!(req.order_type, "limit");
     }
 }

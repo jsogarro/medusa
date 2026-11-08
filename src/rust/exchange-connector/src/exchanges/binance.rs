@@ -99,6 +99,47 @@ impl BinanceClient {
     }
 
     /// Get current timestamp in milliseconds
+    /// Build the unsigned `POST /api/v3/order` parameters.
+    fn build_order_params(
+        order: &Order,
+        timestamp_ms: u64,
+    ) -> Result<Vec<(&'static str, String)>, ExchangeError> {
+        let order_type = match order.order_type {
+            OrderType::Limit => "LIMIT",
+            OrderType::Market => "MARKET",
+            _ => {
+                return Err(ExchangeError::InvalidRequest(
+                    "Unsupported order type".into(),
+                ))
+            }
+        };
+        let side = match order.side {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        };
+
+        let mut params = vec![
+            ("symbol", Self::normalize_pair(&order.pair)),
+            ("side", side.to_string()),
+            ("type", order_type.to_string()),
+            ("quantity", order.quantity.to_string()),
+            ("timestamp", timestamp_ms.to_string()),
+        ];
+
+        if order.order_type == OrderType::Limit {
+            let price = order.price.ok_or_else(|| {
+                ExchangeError::InvalidRequest("Limit order requires price".into())
+            })?;
+            params.push(("price", price.to_string()));
+            params.push(("timeInForce", "GTC".to_string()));
+        }
+        if let Some(id) = &order.client_order_id {
+            params.push(("newClientOrderId", id.clone()));
+        }
+
+        Ok(params)
+    }
+
     fn get_timestamp_ms() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -507,42 +548,10 @@ impl ExchangeClient for BinanceClient {
         }
 
         let url = format!("{}/api/v3/order", BASE_URL);
-        let timestamp = Self::get_timestamp_ms();
 
-        let order_type = match order.order_type {
-            OrderType::Limit => "LIMIT",
-            OrderType::Market => "MARKET",
-            _ => {
-                return Err(ExchangeError::InvalidRequest(
-                    "Unsupported order type".into(),
-                ))
-            }
-        };
-
-        let side = match order.side {
-            Side::Buy => "BUY",
-            Side::Sell => "SELL",
-        };
-
-        let symbol = Self::normalize_pair(&order.pair);
-        let mut params = vec![
-            ("symbol", symbol.clone()),
-            ("side", side.to_string()),
-            ("type", order_type.to_string()),
-            ("quantity", order.quantity.to_string()),
-            ("timestamp", timestamp.to_string()),
-        ];
-
-        if order.order_type == OrderType::Limit {
-            if let Some(price) = order.price {
-                params.push(("price", price.to_string()));
-                params.push(("timeInForce", "GTC".to_string()));
-            } else {
-                return Err(ExchangeError::InvalidRequest(
-                    "Limit order requires price".into(),
-                ));
-            }
-        }
+        // Wait for the limiter before taking the timestamp that gets signed.
+        self.rate_limiter.acquire(Some("/order"), 1).await;
+        let mut params = Self::build_order_params(order, Self::get_timestamp_ms())?;
 
         let query_string = params
             .iter()
@@ -556,7 +565,6 @@ impl ExchangeClient for BinanceClient {
             "Placing Binance order: {:?} {} {} @ {:?}",
             order.side, order.quantity, order.pair, order.price
         );
-        self.rate_limiter.acquire(Some("/order"), 1).await;
 
         let response = self
             .client
@@ -1003,5 +1011,36 @@ mod tests {
     async fn place_order_rejects_invalid_orders_binance() {
         let client = BinanceClient::new("k".into(), "s".into());
         crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
+
+    fn find<'a>(p: &'a [(&'static str, String)], k: &str) -> Option<&'a str> {
+        p.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn build_order_params_limit_carries_client_order_id() {
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            ..crate::client::tests::sample_order()
+        };
+        let p = BinanceClient::build_order_params(&order, 123).unwrap();
+        assert_eq!(find(&p, "newClientOrderId"), Some("my-id-1"));
+        assert_eq!(find(&p, "type"), Some("LIMIT"));
+        assert_eq!(find(&p, "price"), Some("50000"));
+        assert_eq!(find(&p, "timeInForce"), Some("GTC"));
+        assert_eq!(find(&p, "timestamp"), Some("123"));
+    }
+
+    #[test]
+    fn build_order_params_without_client_id_or_market_price() {
+        let order = Order {
+            order_type: OrderType::Market,
+            price: None,
+            ..crate::client::tests::sample_order()
+        };
+        let p = BinanceClient::build_order_params(&order, 1).unwrap();
+        assert_eq!(find(&p, "newClientOrderId"), None);
+        assert_eq!(find(&p, "price"), None);
+        assert_eq!(find(&p, "type"), Some("MARKET"));
     }
 }
