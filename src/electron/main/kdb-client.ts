@@ -6,6 +6,10 @@ export interface KdbConfig {
   port: number
 }
 
+export interface KdbClientOptions {
+  queryTimeoutMs?: number
+}
+
 export class KdbClient extends EventEmitter {
   private connection: q.Connection | null = null
   private config: KdbConfig
@@ -13,10 +17,16 @@ export class KdbClient extends EventEmitter {
   private reconnectAttempts = 0
   private readonly MAX_RECONNECT_DELAY = 60000
   private shouldReconnect = true
+  private readonly subscriptions = new Set<string>()
+  private readonly queryTimeoutMs: number
 
-  constructor(config: KdbConfig) {
+  constructor(config: KdbConfig, options: KdbClientOptions = {}) {
     super()
     this.config = config
+    this.queryTimeoutMs = options.queryTimeoutMs ?? 10_000
+    // EventEmitter throws on an 'error' event with no listener, which would crash the
+    // main process and skip the reconnect scheduling. Always keep one listener attached.
+    this.on('error', (err) => console.error('[KDB] Error:', err))
   }
 
   async connect(): Promise<void> {
@@ -56,6 +66,8 @@ export class KdbClient extends EventEmitter {
       console.log(`[KDB] Connected to ${this.config.host}:${this.config.port}`)
 
       connection.addListener('close', () => {
+        // Ignore a late close from a connection that has already been replaced.
+        if (this.connection !== connection) return
         this.connection = null
         this.emit('disconnected')
         if (this.shouldReconnect) {
@@ -65,12 +77,15 @@ export class KdbClient extends EventEmitter {
 
       connection.addListener('error', (err: Error) => {
         this.emit('error', err)
-        console.error('[KDB] Error:', err)
       })
 
       connection.addListener('upd', (table: string, ...data: any[]) => {
         this.emit('update', table, data.length <= 1 ? data[0] : data)
       })
+
+      for (const table of this.subscriptions) {
+        await this.sendSubscribe(table).catch((err) => this.emit('error', err))
+      }
     } catch (error) {
       this.emit('error', error)
       if (this.shouldReconnect) {
@@ -98,6 +113,11 @@ export class KdbClient extends EventEmitter {
   }
 
   async subscribe(table: string): Promise<void> {
+    await this.sendSubscribe(table)
+    this.subscriptions.add(table)
+  }
+
+  private async sendSubscribe(table: string): Promise<void> {
     if (!this.connection) {
       throw new Error('Not connected to kdb+')
     }
@@ -132,7 +152,11 @@ export class KdbClient extends EventEmitter {
     }
 
     return await new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`kdb+ query timed out after ${this.queryTimeoutMs}ms`))
+      }, this.queryTimeoutMs)
       const callback = (error: Error | undefined, result: T | undefined) => {
+        clearTimeout(timer)
         if (error) {
           reject(error)
           return
