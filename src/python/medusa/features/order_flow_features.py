@@ -46,12 +46,9 @@ def vpin(
     order_imbalance = (bucket_buy - bucket_sell).abs()
     vpin_vals = (order_imbalance / bucket_total.replace(0, np.nan)).rolling(window).mean()
 
-    # Map back to original index
-    vpin_series = pd.Series(index=df.index, dtype=float)
-    for i, idx in enumerate(df.index):
-        bucket = bucket_idx.loc[idx]
-        if bucket in vpin_vals.index:
-            vpin_series.loc[idx] = vpin_vals.loc[bucket]
+    # Map back to bars. A bar's own bucket is still filling, so it only sees
+    # the VPIN of the previous (completed) bucket - never a later bar's volume.
+    vpin_series = bucket_idx.map(vpin_vals.shift(1)).astype(float)
 
     # VPIN is a probability metric — clip to [0, 1]
     return vpin_series.clip(0, 1).ffill()

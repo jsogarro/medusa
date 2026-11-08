@@ -40,7 +40,7 @@ class FeaturePipeline:
     1. Add technical indicators
     2. Drop NaN rows from indicator warm-up
     3. Select feature columns
-    4. Create target variable
+    4. Create target variable (next-bar value of ``target_col``)
     5. Scale features
     6. Split train/test
     """
@@ -129,7 +129,11 @@ class FeaturePipeline:
         if self.target_col not in enriched.columns:
             raise ValueError(f"Target column '{self.target_col}' not found")
 
-        target = enriched[self.target_col]
+        # The target is the NEXT bar's value: features at t may only predict t+1.
+        # Using the same-bar value would leak the bar's own return into its features.
+        target = enriched[self.target_col].shift(-1)
+        enriched = enriched.iloc[:-1]
+        target = target.iloc[:-1]
 
         # Step 4: Select features
         if feature_cols:

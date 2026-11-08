@@ -67,58 +67,28 @@ class MLMetaLabelingStrategy(BaseStrategy):
             Labels: 1 = hit take-profit, -1 = hit stop-loss, 0 = time-out.
         """
         labels = pd.Series(0, index=prices.index)
+        values = prices.to_numpy(dtype=float)
+        sides = side.to_numpy()
 
         for i in range(len(prices) - self.max_holding_bars):
-            if side.iloc[i] == 0:
+            if sides[i] == 0:
                 continue  # No trade
 
-            entry_price = prices.iloc[i]
-            future_prices = prices.iloc[i + 1 : i + self.max_holding_bars + 1]
+            # Signed return of the position over the holding window
+            window = values[i + 1 : i + self.max_holding_bars + 1]
+            ret = sides[i] * (window / values[i] - 1)
+            hit_tp = ret >= self.take_profit_pct
+            hit_sl = ret <= -self.stop_loss_pct
 
-            if side.iloc[i] == 1:  # Long
-                # Upper barrier (take-profit)
-                upper_barrier = entry_price * (1 + self.take_profit_pct)
-                # Lower barrier (stop-loss)
-                lower_barrier = entry_price * (1 - self.stop_loss_pct)
+            first_tp = hit_tp.argmax() if hit_tp.any() else len(window)
+            first_sl = hit_sl.argmax() if hit_sl.any() else len(window)
 
-                hit_upper = future_prices >= upper_barrier
-                hit_lower = future_prices <= lower_barrier
-
-                if hit_upper.any():
-                    first_upper = hit_upper.idxmax()
-                    first_lower = hit_lower.idxmax() if hit_lower.any() else pd.Timestamp.max
-
-                    if first_upper <= first_lower:
-                        labels.iloc[i] = 1  # Take-profit
-                    else:
-                        labels.iloc[i] = -1  # Stop-loss
-                elif hit_lower.any():
-                    labels.iloc[i] = -1  # Stop-loss
-                else:
-                    # Time-out: use final return sign
-                    final_return = (future_prices.iloc[-1] - entry_price) / entry_price
-                    labels.iloc[i] = np.sign(final_return)
-
-            elif side.iloc[i] == -1:  # Short
-                upper_barrier = entry_price * (1 - self.take_profit_pct)  # Short TP is lower
-                lower_barrier = entry_price * (1 + self.stop_loss_pct)  # Short SL is higher
-
-                hit_upper = future_prices <= upper_barrier
-                hit_lower = future_prices >= lower_barrier
-
-                if hit_upper.any():
-                    first_upper = hit_upper.idxmax()
-                    first_lower = hit_lower.idxmax() if hit_lower.any() else pd.Timestamp.max
-
-                    if first_upper <= first_lower:
-                        labels.iloc[i] = 1  # Take-profit
-                    else:
-                        labels.iloc[i] = -1  # Stop-loss
-                elif hit_lower.any():
-                    labels.iloc[i] = -1  # Stop-loss
-                else:
-                    final_return = (entry_price - future_prices.iloc[-1]) / entry_price
-                    labels.iloc[i] = np.sign(final_return)
+            if first_tp == first_sl == len(window):
+                labels.iloc[i] = np.sign(ret[-1])  # Time-out: sign of final return
+            elif first_tp < first_sl:
+                labels.iloc[i] = 1  # Take-profit first
+            else:
+                labels.iloc[i] = -1  # Stop-loss first (ties resolve conservatively)
 
         return labels
 
@@ -166,7 +136,7 @@ class MLMetaLabelingStrategy(BaseStrategy):
             data: OHLCV DataFrame with features.
 
         Returns:
-            Tuple of (entries, exits) as boolean Series.
+            Tuple of (long entries, long exits) as boolean Series.
         """
         features = self._extract_features(data)
 
@@ -189,24 +159,31 @@ class MLMetaLabelingStrategy(BaseStrategy):
             # No meta-model: always take primary signals
             meta_filter = pd.Series(True, index=features.index)
 
-        # Entries: primary says BUY/SELL and meta is confident
-        long_entries = (primary_series == 1) & meta_filter
-        short_entries = (primary_series == -1) & meta_filter
-        entries = long_entries | short_entries
+        # Long-only: a short primary signal must never open a long position.
+        # Short entries are exposed separately via generate_short_entries().
+        entries = (primary_series == 1) & meta_filter
 
-        # Exits: primary says NO TRADE or meta confidence drops
-        no_trade = primary_series == 0
+        # Exits: primary no longer says long, or meta confidence drops
+        exits = primary_series != 1
         if self.meta_model is not None:
-            meta_exit = meta_confidence < (self.meta_threshold * 0.8)  # 80% of threshold
-            exits = no_trade | meta_exit
-        else:
-            exits = no_trade
+            exits = exits | (meta_confidence < (self.meta_threshold * 0.8))
 
         # Reindex to match original data
         entries = entries.reindex(data.index, fill_value=False)
         exits = exits.reindex(data.index, fill_value=False)
 
         return entries, exits
+
+    def generate_short_entries(self, data: pd.DataFrame) -> pd.Series:
+        """Short entry signals (primary == -1 and meta-confident), for ``short_entries``."""
+        features = self._extract_features(data)
+        primary_series = pd.Series(self.primary_model.predict(features), index=features.index)
+        short = primary_series == -1
+        if self.meta_model is not None:
+            proba = self.meta_model.predict_proba(features)
+            conf = proba[:, 1] if proba.ndim > 1 else proba
+            short = short & (pd.Series(conf, index=features.index) >= self.meta_threshold)
+        return short.reindex(data.index, fill_value=False)
 
     def generate_signal(
         self,

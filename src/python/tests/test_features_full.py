@@ -217,7 +217,7 @@ class TestOrderFlowFeatures:
     def sample_trade_data(self):
         """Generate sample trade data."""
         np.random.seed(42)
-        dates = pd.date_range("2024-01-01", periods=1000, freq="T")  # Minute bars
+        dates = pd.date_range("2024-01-01", periods=1000, freq="min")  # Minute bars
 
         return pd.DataFrame(
             {
@@ -239,9 +239,9 @@ class TestOrderFlowFeatures:
 
         # VPIN should be between 0 and 1
         valid_vpin = vpin_values.dropna()
-        if not valid_vpin.empty:
-            assert (valid_vpin >= 0).all()
-            assert (valid_vpin <= 1).all()
+        assert not valid_vpin.empty
+        assert (valid_vpin >= 0).all()
+        assert (valid_vpin <= 1).all()
 
     def test_vpin_volume_bucket_size(self, sample_trade_data):
         """Test VPIN with different bucket sizes."""
@@ -321,7 +321,7 @@ class TestMicrostructureFeatures:
     def sample_trades(self):
         """Generate sample trade data with bid/ask."""
         np.random.seed(42)
-        dates = pd.date_range("2024-01-01", periods=100, freq="T")
+        dates = pd.date_range("2024-01-01", periods=100, freq="min")
 
         mid_price = 100.0
         spread = 0.1

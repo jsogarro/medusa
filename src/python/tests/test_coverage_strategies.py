@@ -293,21 +293,21 @@ class TestMLMetaLabelingStrategy:
 class TestPairsTradingStrategy:
     """Test PairsTradingStrategy."""
 
-    def test_update_cointegration(self) -> None:
-        """Test _update_cointegration method."""
-        strategy = PairsTradingStrategy(asset1="BTC", asset2="ETH")
+    def test_rolling_hedge_ratio(self) -> None:
+        """Hedge ratio is walk-forward: NaN until a full lookback exists, then set."""
+        strategy = PairsTradingStrategy(asset1="BTC", asset2="ETH", lookback=250)
 
         # Create cointegrated price series
         dates = pd.date_range("2024-01-01", periods=300, freq="1h")
         price1 = pd.Series(100 + np.cumsum(np.random.randn(300) * 0.1), index=dates)
         price2 = price1 * 0.05 + np.random.randn(300) * 0.01  # Cointegrated
 
-        strategy._update_cointegration(price1, price2)
+        ratio = strategy._rolling_hedge_ratio(price1, price2)
 
-        # Should set hedge ratio and last retest date
-        assert strategy._hedge_ratio is not None
+        assert ratio.iloc[:250].isna().all()
+        assert ratio.iloc[250:].notna().all()
         assert strategy._last_retest_date is not None
-        assert strategy._last_retest_date == dates[-1]
+        assert strategy._last_retest_date >= dates[249]
 
     def test_generate_signal_multiindex(self) -> None:
         """Test generate_signal with MultiIndex columns."""
