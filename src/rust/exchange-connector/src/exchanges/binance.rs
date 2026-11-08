@@ -2,7 +2,9 @@
 //!
 //! REST API documentation: https://binance-docs.github.io/apidocs/spot/en/
 
-use crate::client::{ExchangeClient, ExchangeError};
+use crate::client::{
+    http_client, ExchangeClient, ExchangeError, MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
+};
 use crate::rate_limiter::RateLimiter;
 use crate::types::{Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side};
 use async_trait::async_trait;
@@ -17,11 +19,6 @@ use tracing::{debug, trace};
 type HmacSha256 = Hmac<Sha256>;
 
 const BASE_URL: &str = "https://api.binance.com";
-
-// Security: Validation constants
-const MAX_PRICE: f64 = 1_000_000_000.0;
-const MAX_QUANTITY: f64 = 1_000_000_000.0;
-const MIN_POSITIVE: f64 = 1e-18;
 
 /// Binance exchange client
 ///
@@ -64,7 +61,7 @@ impl BinanceClient {
     /// Binance: 1200 weight/minute (using conservative 15 req/sec = 900/min)
     pub fn new(api_key: String, secret_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_key,
             secret_key,
             rate_limiter: Arc::new(RateLimiter::new(15, None)),
@@ -502,6 +499,7 @@ impl ExchangeClient for BinanceClient {
     }
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
+        crate::client::validate_order(order)?;
         if !self.has_credentials() {
             return Err(ExchangeError::Authentication(
                 "API credentials not configured".into(),
@@ -999,5 +997,11 @@ mod tests {
         assert!(!debug_str.contains("super_secret_key"));
         assert!(!debug_str.contains("super_secret_secret"));
         assert!(debug_str.contains("<redacted>"));
+    }
+
+    #[tokio::test]
+    async fn place_order_rejects_invalid_orders_binance() {
+        let client = BinanceClient::new("k".into(), "s".into());
+        crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
     }
 }

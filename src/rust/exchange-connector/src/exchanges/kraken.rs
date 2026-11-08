@@ -2,7 +2,9 @@
 //!
 //! REST API documentation: https://docs.kraken.com/rest/
 
-use crate::client::{ExchangeClient, ExchangeError};
+use crate::client::{
+    http_client, ExchangeClient, ExchangeError, MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
+};
 use crate::rate_limiter::RateLimiter;
 use crate::types::{Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side};
 use async_trait::async_trait;
@@ -23,11 +25,6 @@ const BASE_URL: &str = "https://api.kraken.com";
 
 // Security: Atomic counter for nonce uniqueness
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-// Security: Validation constants
-const MAX_PRICE: f64 = 1_000_000_000.0;
-const MAX_QUANTITY: f64 = 1_000_000_000.0;
-const MIN_POSITIVE: f64 = 1e-18;
 
 /// Kraken exchange client
 ///
@@ -64,7 +61,7 @@ impl KrakenClient {
     /// Kraken: 15 requests/sec for Tier 2, 20 for Tier 3 (using conservative 10/sec)
     pub fn new(api_key: String, api_secret: String) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_key,
             api_secret,
             rate_limiter: Arc::new(RateLimiter::new(10, None)),
@@ -469,6 +466,7 @@ impl ExchangeClient for KrakenClient {
     }
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
+        crate::client::validate_order(order)?;
         let path = "/0/private/AddOrder";
         let url = format!("{}{}", BASE_URL, path);
         let nonce = Self::get_nonce();
@@ -625,5 +623,11 @@ mod tests {
 
         let err = KrakenClient::parse_error(400, r#"{"error": ["EFunding:Insufficient funds"]}"#);
         assert!(matches!(err, ExchangeError::InsufficientBalance(_)));
+    }
+
+    #[tokio::test]
+    async fn place_order_rejects_invalid_orders_kraken() {
+        let client = KrakenClient::new("k".into(), "c2VjcmV0".into());
+        crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
     }
 }

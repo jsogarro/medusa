@@ -100,7 +100,7 @@ impl AlpacaClient {
         };
 
         Self {
-            client: Client::new(),
+            client: crate::client::http_client(),
             base_url,
             data_url: MARKET_DATA_URL.to_string(),
             api_key,
@@ -496,6 +496,7 @@ impl ExchangeClient for AlpacaClient {
     }
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
+        crate::client::validate_order(order)?;
         let req = OrderRequest {
             symbol: order.pair.clone(),
             qty: Some(order.quantity.to_string()),
@@ -630,5 +631,11 @@ mod tests {
             result.unwrap_err(),
             ExchangeError::Authentication(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn place_order_rejects_invalid_orders_alpaca() {
+        let client = AlpacaClient::new("k".into(), "s".into(), true);
+        crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
     }
 }

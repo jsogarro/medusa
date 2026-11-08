@@ -5,7 +5,9 @@
 //! - Exchange: https://docs.cloud.coinbase.com/exchange/reference
 //! - Advanced Trade: https://docs.cdp.coinbase.com/advanced-trade/docs
 
-use crate::client::{ExchangeClient, ExchangeError};
+use crate::client::{
+    http_client, ExchangeClient, ExchangeError, MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
+};
 use crate::rate_limiter::RateLimiter;
 use crate::types::{Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side};
 use async_trait::async_trait;
@@ -30,11 +32,6 @@ const ADVANCED_HOST: &str = "api.coinbase.com";
 
 // Security: Atomic counter for nonce uniqueness
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-// Security: Validation constants for price/quantity bounds
-const MAX_PRICE: f64 = 1_000_000_000.0;
-const MAX_QUANTITY: f64 = 1_000_000_000.0;
-const MIN_POSITIVE: f64 = 1e-18;
 
 /// Coinbase exchange client
 ///
@@ -93,7 +90,7 @@ impl CoinbaseClient {
         }
 
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_key,
             api_secret,
             passphrase: if use_advanced { None } else { Some(passphrase) },
@@ -1069,6 +1066,7 @@ impl ExchangeClient for CoinbaseClient {
     }
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
+        crate::client::validate_order(order)?;
         debug!(
             "Placing Coinbase order: {:?} {} {} @ {:?}",
             order.side, order.quantity, order.pair, order.price
@@ -1679,5 +1677,11 @@ mod tests {
 
         assert_eq!(parsed["order_ids"].as_array().unwrap().len(), 2);
         assert_eq!(parsed["order_ids"][0], "order-1");
+    }
+
+    #[tokio::test]
+    async fn place_order_rejects_invalid_orders_coinbase() {
+        let client = CoinbaseClient::new("k".into(), "c2VjcmV0".into(), "p".into());
+        crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
     }
 }

@@ -2,7 +2,9 @@
 //!
 //! REST API documentation: https://www.bitstamp.net/api/
 
-use crate::client::{ExchangeClient, ExchangeError};
+use crate::client::{
+    http_client, ExchangeClient, ExchangeError, MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
+};
 use crate::rate_limiter::RateLimiter;
 use crate::types::{Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side};
 use async_trait::async_trait;
@@ -21,11 +23,6 @@ const BASE_URL: &str = "https://www.bitstamp.net/api/v2";
 
 // Security: Atomic counter for nonce uniqueness
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-// Security: Validation constants for price/quantity bounds
-const MAX_PRICE: f64 = 1_000_000_000.0; // $1B per unit
-const MAX_QUANTITY: f64 = 1_000_000_000.0; // 1B units
-const MIN_POSITIVE: f64 = 1e-18; // 18 decimal places
 
 /// Bitstamp REST client
 ///
@@ -65,7 +62,7 @@ impl BitstampClient {
     /// Bitstamp rate limits: 8000 requests per 10 minutes = ~13 req/sec
     pub fn new(api_key: String, api_secret: String, customer_id: String) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_key,
             api_secret,
             customer_id,
@@ -411,6 +408,7 @@ impl ExchangeClient for BitstampClient {
     }
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
+        crate::client::validate_order(order)?;
         let normalized_pair = Self::normalize_pair(&order.pair);
         let endpoint = match (order.side, order.order_type) {
             (Side::Buy, OrderType::Limit) => format!("/buy/{}/", normalized_pair),
@@ -570,4 +568,10 @@ mod tests {
     }
 
     // Note: Real API tests require credentials and should be run manually or in CI with test credentials
+
+    #[tokio::test]
+    async fn place_order_rejects_invalid_orders_bitstamp() {
+        let client = BitstampClient::new("k".into(), "s".into(), "c".into());
+        crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
 }
