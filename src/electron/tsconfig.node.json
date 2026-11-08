@@ -8,6 +8,7 @@
     "moduleResolution": "node",
     "resolveJsonModule": true,
     "strict": true,
+    "allowSyntheticDefaultImports": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "outDir": "./dist-electron",
@@ -17,5 +18,5 @@
     },
     "types": ["node"]
   },
-  "include": ["main/**/*", "electron.vite.config.ts"]
+  "include": ["main/**/*", "electron.vite.config.ts", "vitest.config.ts"]
 }
