@@ -60,14 +60,21 @@ impl KdbClient {
             .await
             .map_err(|e| KdbError::ConnectionError(e.to_string()))?;
 
-        // Wait for authentication response (1 byte: 0x01 = success, 0x00 = failure)
+        // The server replies with one capability byte (the protocol version both
+        // sides agreed on, 3 for q 4.x) and closes the socket if the login is rejected.
         let mut response = [0u8; 1];
-        timeout(NETWORK_TIMEOUT, stream.read_exact(&mut response))
+        match timeout(NETWORK_TIMEOUT, stream.read_exact(&mut response))
             .await
             .map_err(|_| KdbError::ConnectionError("Authentication timeout".to_string()))?
-            .map_err(|e| KdbError::ConnectionError(e.to_string()))?;
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(KdbError::AuthenticationFailed)
+            }
+            Err(e) => return Err(KdbError::ConnectionError(e.to_string())),
+        }
 
-        if response[0] != 1 {
+        if response[0] == 0 {
             return Err(KdbError::AuthenticationFailed);
         }
 
@@ -206,13 +213,21 @@ impl KdbClient {
 mod tests {
     use super::*;
 
-    // Integration tests - require a running kdb+ process
-    // Run with: cargo test -- --ignored
+    // Integration tests - require a running kdb+ process (port from KDB_TEST_PORT,
+    // default 5001). Run with: cargo test -- --ignored
+    fn test_port() -> u16 {
+        std::env::var("KDB_TEST_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(5001)
+    }
 
     #[tokio::test]
     #[ignore]
     async fn test_connect_and_query() {
-        let mut client = KdbClient::connect("localhost", 5001, "", "").await.unwrap();
+        let mut client = KdbClient::connect("localhost", test_port(), "", "")
+            .await
+            .unwrap();
 
         let result = client.query("2+2").await.unwrap();
         assert!(matches!(result, KObject::Long(4)));
@@ -223,7 +238,9 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_send_async() {
-        let mut client = KdbClient::connect("localhost", 5001, "", "").await.unwrap();
+        let mut client = KdbClient::connect("localhost", test_port(), "", "")
+            .await
+            .unwrap();
 
         let obj = KObject::CharList(b"show `async_test".to_vec());
         client.send_async(obj).await.unwrap();
@@ -234,7 +251,46 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_auth_failure() {
-        let result = KdbClient::connect("localhost", 5001, "bad", "creds").await;
+        let result = KdbClient::connect("localhost", test_port(), "bad", "creds").await;
+        assert!(matches!(result, Err(KdbError::AuthenticationFailed)));
+    }
+
+    /// Fake kdb+ listener: reads the login string up to its NUL terminator, then
+    /// replies with `reply` (or just closes when `None`, as q does on a bad login).
+    async fn fake_q(reply: Option<u8>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+            }
+            if let Some(r) = reply {
+                sock.write_all(&[r]).await.unwrap();
+                // keep the socket open until the client drops it
+                let _ = sock.read(&mut b).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn test_handshake_accepts_modern_capability_byte() {
+        // q 4.x answers the login with the negotiated capability (3), not 1.
+        let port = fake_q(Some(3)).await;
+        let result = KdbClient::connect("127.0.0.1", port, "", "").await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_handshake_closed_connection_is_auth_failure() {
+        // q closes the socket without replying when the login is rejected.
+        let port = fake_q(None).await;
+        let result = KdbClient::connect("127.0.0.1", port, "bad", "creds").await;
         assert!(matches!(result, Err(KdbError::AuthenticationFailed)));
     }
 
