@@ -33,21 +33,16 @@ impl ExchangeSubscriber {
         loop {
             info!("Connecting to {} WebSocket", self.config.name);
 
+            // The loop returns Ok when the server closes, the stream ends or the
+            // connection goes stale; every exit means the book has stopped updating.
             match self.subscribe_loop().await {
-                Ok(_) => {
-                    info!("{} subscriber completed normally", self.config.name);
-                    break;
-                }
-                Err(e) => {
-                    error!("{} subscriber error: {}", self.config.name, e);
-                    let delay = backoff.next_delay();
-                    warn!("Reconnecting in {:?}", delay);
-                    tokio::time::sleep(delay).await;
-                }
+                Ok(()) => warn!("{} connection ended, reconnecting", self.config.name),
+                Err(e) => error!("{} subscriber error: {}", self.config.name, e),
             }
+            let delay = backoff.next_delay();
+            warn!("Reconnecting in {:?}", delay);
+            tokio::time::sleep(delay).await;
         }
-
-        Ok(())
     }
 
     /// Single WebSocket connection lifecycle
@@ -262,5 +257,45 @@ impl ExchangeSubscriber {
                 })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reconnects_after_server_close_frame() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // Scripted exchange: accept, complete the handshake, close immediately.
+            while let Ok((sock, _)) = listener.accept().await {
+                if let Ok(mut ws) = tokio_tungstenite::accept_async(sock).await {
+                    let _ = ws.close(None).await;
+                    let _ = tx.send(());
+                }
+            }
+        });
+
+        let config = ExchangeConfig {
+            name: "bitstamp".to_string(),
+            ws_url: format!("ws://127.0.0.1:{}", port),
+            rest_url: "http://127.0.0.1:1".to_string(),
+            symbols: vec![],
+            enabled: true,
+        };
+        let publisher = KdbPublisher::lazy("127.0.0.1", 1, "", "");
+        let mut sub = ExchangeSubscriber::new(config, publisher, Duration::from_secs(30));
+        let run = tokio::spawn(async move { sub.run().await });
+
+        rx.recv().await.expect("first connection");
+        let second = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await;
+        run.abort();
+        assert!(
+            matches!(second, Ok(Some(()))),
+            "subscriber must reconnect after a Close frame"
+        );
     }
 }
