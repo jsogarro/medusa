@@ -42,7 +42,12 @@ impl Decoder {
         }
 
         let _msg_type = self.cursor.read_u8()?;
-        let _compression = self.cursor.read_u8()?;
+        let compression = self.cursor.read_u8()?;
+        if compression != 0 {
+            return Err(KdbError::InvalidMessage(
+                "Compressed messages are not supported".to_string(),
+            ));
+        }
         let _reserved = self.cursor.read_u8()?;
         let _total_length = self.cursor.read_u32::<LittleEndian>()?;
 
@@ -578,5 +583,14 @@ mod tests {
         let mut msg = vec![1, 2, 0, 0, 17, 0, 0, 0, 0xf9, 4, 0, 0, 0, 0, 0, 0, 0];
         let mut dec = Decoder::new(std::mem::take(&mut msg));
         assert_eq!(dec.decode_message().unwrap(), KObject::Long(4));
+    }
+
+    #[test]
+    fn test_compressed_message_is_rejected() {
+        let mut enc = Encoder::new();
+        let mut msg = enc.encode_sync(&KObject::Int(42)).unwrap();
+        msg[2] = 1; // header says payload is compressed
+        let mut dec = Decoder::new(msg);
+        assert!(dec.decode_message().is_err());
     }
 }
