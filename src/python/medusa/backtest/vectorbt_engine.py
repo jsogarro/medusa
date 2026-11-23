@@ -144,6 +144,23 @@ class VectorBTEngine:
         logger.info(f"Backtest complete: Return={portfolio.total_return():.2%}")
         return portfolio
 
+    def run_strategy(
+        self,
+        price: pd.Series | pd.DataFrame,
+        strategy: Any,
+        data: pd.DataFrame,
+        **kwargs: Any,
+    ) -> Any:
+        """Backtest a strategy, including its short signals when it has any.
+
+        Strategies exposing ``generate_short_signals(data) -> (short_entries, short_exits)``
+        have them passed to ``run_signals`` as ``short_entries``/``short_exits``.
+        """
+        entries, exits = strategy.generate_signals(data)
+        if hasattr(strategy, "generate_short_signals"):
+            kwargs["short_entries"], kwargs["short_exits"] = strategy.generate_short_signals(data)
+        return self.run_signals(price, entries, exits, **kwargs)
+
     def run_orders(
         self,
         price: pd.Series | pd.DataFrame,

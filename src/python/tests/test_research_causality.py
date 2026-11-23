@@ -168,3 +168,102 @@ def test_vpin_does_not_depend_on_later_bars():
         b = vpin(perturbed, volume_bucket_size=50, window=5)
         pd.testing.assert_series_equal(a.iloc[:k], b.iloc[:k])
         assert a.iloc[:k].notna().any()
+
+
+# --- pairs trading: long/short separation and exits ---------------------------------------
+
+_NAN = float("nan")
+
+
+def _pairs_with_z(monkeypatch, z_values):
+    """A pairs strategy whose hedge ratio is 1 and whose spread z-score is ``z_values``."""
+    from medusa.strategies import pairs_trading
+
+    idx = pd.date_range("2024-01-01", periods=len(z_values), freq="D")
+    z = pd.Series(z_values, index=idx)
+    ratio = pd.Series(np.where(z.isna(), np.nan, 1.0), index=idx)
+    monkeypatch.setattr(PairsTradingStrategy, "_rolling_hedge_ratio", lambda s, p1, p2: ratio)
+    monkeypatch.setattr(pairs_trading, "z_score_spread", lambda spread, window: z)
+    data = pd.DataFrame({("A", "close"): 100.0, ("B", "close"): 50.0}, index=idx)
+    return PairsTradingStrategy("A", "B"), data
+
+
+# z -> (long entry, long exit, short entry, short exit); entry 2, exit 0, stop 3
+_PAIRS_TABLE = [
+    (_NAN, (False, True, False, True)),  # spread undefined: a position must be able to leave
+    (-2.5, (True, False, False, True)),
+    (-3.5, (False, True, False, True)),  # beyond the stop: no entry, stop out
+    (-1.0, (False, False, False, True)),
+    (0.0, (False, True, False, True)),
+    (1.0, (False, True, False, False)),
+    (2.5, (False, True, True, False)),
+    (3.5, (False, True, False, True)),
+]
+
+
+def test_pairs_long_and_short_spread_signals_are_separate(monkeypatch):
+    strat, data = _pairs_with_z(monkeypatch, [0.5] + [z for z, _ in _PAIRS_TABLE])
+    le, lx = strat.generate_signals(data)
+    se, sx = strat.generate_short_signals(data)
+    got = list(zip(le, lx, se, sx))[1:]
+    assert got == [expected for _, expected in _PAIRS_TABLE]
+
+
+def test_pairs_position_can_exit_after_cointegration_breaks(monkeypatch):
+    strat, data = _pairs_with_z(monkeypatch, [0.0, -2.5, -2.5] + [_NAN] * 5)
+    le, lx = strat.generate_signals(data)
+    assert le.iloc[1]
+    assert lx.iloc[3:].all()  # no hedge ratio from bar 3 on: must flatten, never hold
+    assert not le.iloc[3:].any()
+
+
+def test_pairs_exits_when_real_cointegration_breaks():
+    rng = np.random.default_rng(3)
+    n, k = 500, 250
+    common = np.cumsum(rng.normal(0, 0.5, n))
+    a = 100 + common + rng.normal(0, 0.3, n)
+    b = 50 + 0.5 * common + rng.normal(0, 0.15, n)
+    b[k:] = 50 + np.cumsum(rng.normal(0, 3.0, n - k))  # B decouples from A
+    data = pd.DataFrame(
+        {("BTC", "close"): a, ("ETH", "close"): b},
+        index=pd.date_range("2024-01-01", periods=n, freq="D"),
+    )
+    kw = dict(asset1="BTC", asset2="ETH", lookback=100, spread_window=30, retest_period=30)
+    strat = PairsTradingStrategy(**kw)
+    ratio = strat._rolling_hedge_ratio(data[("BTC", "close")], data[("ETH", "close")])
+    assert ratio.iloc[100:k].notna().any() and ratio.iloc[-60:].isna().all()  # it does break
+    le, lx = strat.generate_signals(data)
+    se, sx = strat.generate_short_signals(data)
+    assert lx[ratio.isna()].all() and sx[ratio.isna()].all()
+    assert not le[ratio.isna()].any() and not se[ratio.isna()].any()
+
+
+def test_pairs_short_spread_signal_opens_a_short_position(monkeypatch):
+    from medusa.backtest.vectorbt_engine import VectorBTEngine
+
+    strat, data = _pairs_with_z(monkeypatch, [0.5, 2.5, 1.0, 1.0, -0.5, 0.5])
+    pf = VectorBTEngine(asset_class="crypto").run_strategy(data[("A", "close")], strat, data)
+    assert pf.trades.records_readable["Direction"].tolist() == ["Short"]
+
+
+def test_pairs_long_spread_signal_opens_a_long_position(monkeypatch):
+    from medusa.backtest.vectorbt_engine import VectorBTEngine
+
+    strat, data = _pairs_with_z(monkeypatch, [-0.5, -2.5, -1.0, -1.0, 0.5, -0.5])
+    pf = VectorBTEngine(asset_class="crypto").run_strategy(data[("A", "close")], strat, data)
+    assert pf.trades.records_readable["Direction"].tolist() == ["Long"]
+
+
+def test_pairs_short_signals_do_not_depend_on_later_bars():
+    data = _pair()
+    k = 300
+    perturbed = data.copy()
+    perturbed.iloc[k:, 0] += np.linspace(0, 60, len(data) - k)
+    kw = dict(asset1="BTC", asset2="ETH", lookback=100, spread_window=30, retest_period=30)
+    a = PairsTradingStrategy(**kw).generate_short_signals(data)
+    b = PairsTradingStrategy(**kw).generate_short_signals(perturbed)
+    for s1, s2 in zip(a, b):
+        pd.testing.assert_series_equal(s1.iloc[:k], s2.iloc[:k])
+    assert a[0].iloc[:k].any() or a[1].iloc[:k].any()  # not vacuous
+
+
