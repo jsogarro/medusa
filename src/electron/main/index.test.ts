@@ -1,4 +1,6 @@
+import { pathToFileURL } from 'node:url'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { RENDERER_FILE } from './security'
 
 const h = vi.hoisted(() => ({
   handlers: new Map<string, (...args: any[]) => any>(),
@@ -57,7 +59,7 @@ vi.mock('electron', () => {
   }
 })
 
-const TRUSTED = { senderFrame: { url: 'file:///app/out/renderer/index.html' } }
+const TRUSTED = { senderFrame: { url: pathToFileURL(RENDERER_FILE).href } }
 
 beforeAll(async () => {
   await import('./index')
@@ -105,5 +107,23 @@ describe('symbolLink:changed', () => {
     const w = new (h.windows[0].constructor as any)()
     changed(...args)
     expect(sends(w)).toEqual([])
+  })
+})
+
+describe('renderer hardening', () => {
+  it('denies every permission request', () => {
+    const cb = vi.fn()
+    h.permissionHandler!({}, 'media', cb)
+    h.permissionHandler!({}, 'geolocation', cb)
+    expect(cb.mock.calls).toEqual([[false], [false]])
+  })
+
+  it('denies webview attachment in every web contents', () => {
+    const on = vi.fn()
+    h.appEvents.get('web-contents-created')!({}, { on })
+    expect(on).toHaveBeenCalledWith('will-attach-webview', expect.any(Function))
+    const event = { preventDefault: vi.fn() }
+    on.mock.calls.find((c) => c[0] === 'will-attach-webview')![1](event)
+    expect(event.preventDefault).toHaveBeenCalled()
   })
 })

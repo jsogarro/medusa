@@ -59,9 +59,11 @@ vi.mock('./kdb-client', async () => {
   return { KdbClient: FakeKdbClient, SAFE_TABLE: /^[a-z][a-zA-Z0-9_.]*$/ }
 })
 
+import { pathToFileURL } from 'node:url'
 import { checkIpcLimit, setupIpcHandlers } from './ipc-handlers'
+import { RENDERER_FILE } from './security'
 
-const TRUSTED = { senderFrame: { url: 'file:///app/out/renderer/index.html' } }
+const TRUSTED = { senderFrame: { url: pathToFileURL(RENDERER_FILE).href } }
 const EVIL = { senderFrame: { url: 'https://evil.example/' } }
 const win = { isDestroyed: () => false, webContents: { send: vi.fn() } } as any
 const cfg = { tp: { host: 'localhost', port: 5010 }, rdb: { host: 'localhost', port: 5011 } }

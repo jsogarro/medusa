@@ -1,8 +1,8 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, session } from 'electron'
 import { join } from 'path'
 import { checkIpcLimit, setupIpcHandlers } from './ipc-handlers'
 import { isValidSymbolLink } from './validation'
-import { DEV_SERVER_URL, isDevMode, isTrustedSender, isTrustedUrl } from './security'
+import { DEV_SERVER_URL, isDevMode, isTrustedSender, isTrustedUrl, RENDERER_FILE } from './security'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -37,7 +37,7 @@ function createWindow(): void {
     mainWindow.loadURL(DEV_SERVER_URL)
     mainWindow.webContents.openDevTools()
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(RENDERER_FILE)
   }
 
   mainWindow.on('closed', () => {
@@ -100,7 +100,7 @@ ipcMain.handle('window:popout', (event, widgetId: string, config: any) => {
     popout.loadURL(`${DEV_SERVER_URL}?${params.toString()}`)
     popout.webContents.openDevTools()
   } else {
-    popout.loadFile(join(__dirname, '../renderer/index.html'), {
+    popout.loadFile(RENDERER_FILE, {
       query: Object.fromEntries(params.entries())
     })
   }
@@ -118,8 +118,15 @@ ipcMain.on('symbolLink:changed', (event, color: string, symbol: string, exchange
   })
 })
 
+// <webview> tags would let a page embed arbitrary content; the app never uses them.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-attach-webview', (event) => event.preventDefault())
+})
+
 // App lifecycle
 app.whenReady().then(() => {
+  // The app needs no camera, microphone, geolocation, notification or similar grants.
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
   createWindow()
 
   app.on('activate', () => {
