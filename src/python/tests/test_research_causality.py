@@ -85,6 +85,20 @@ def test_pipeline_target_is_next_bar_return():
     assert out["y_train"].loc[idx] == r.loc[nxt]
 
 
+def test_pipeline_rows_do_not_depend_on_later_bars():
+    df = _random_walk(1500)
+    k = 1450  # past the train/test boundary, so scaling is unaffected
+    perturbed = df.copy()
+    perturbed.iloc[k:, :] = perturbed.iloc[k:, :] * 3
+    a = FeaturePipeline().run(df)
+    b = FeaturePipeline().run(perturbed)
+    np.testing.assert_array_equal(a["x_train"], b["x_train"])
+    pd.testing.assert_series_equal(a["y_train"], b["y_train"])
+    m = len(a["x_test"]) - 100  # rows well before k (feature windows + 1-bar target)
+    np.testing.assert_array_equal(a["x_test"][:m], b["x_test"][:m])
+    pd.testing.assert_series_equal(a["y_test"].iloc[:m], b["y_test"].iloc[:m])
+
+
 def test_pipeline_random_walk_out_of_sample_r2_near_zero():
     out = FeaturePipeline().run(_random_walk(1500))
     xtr, ytr = out["x_train"].to_numpy(), out["y_train"].to_numpy()
