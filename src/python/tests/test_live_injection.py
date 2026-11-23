@@ -137,3 +137,11 @@ def test_alpaca_period_1y_and_unknown():
     assert _normalize_period("1Y") == "1Y"
     with pytest.raises(ValueError):
         _normalize_period("5Y")
+
+
+def test_validate_symbol_rejects_trailing_newline():
+    from medusa.data.validators import validate_symbol
+
+    validate_symbol("AAPL")
+    with pytest.raises(ValueError):
+        validate_symbol("AAPL\n")
