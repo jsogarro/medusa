@@ -13,13 +13,12 @@ from loguru import logger
 
 from medusa.utils.config import KdbConfig, get_settings
 
-_SYMBOL_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
-_INTERVAL_WHITELIST = {"1m", "5m", "15m", "1h", "4h", "1d"}
+_SYMBOL_RE = re.compile(r"[A-Za-z0-9._]{1,30}")
 
 
 def _validate_symbol(symbol: str) -> str:
     """Validate symbol contains only safe characters for q queries."""
-    if not _SYMBOL_RE.match(symbol):
+    if not _SYMBOL_RE.fullmatch(symbol):
         raise ValueError(f"Invalid symbol format: {symbol!r}")
     return symbol
 
@@ -45,11 +44,11 @@ class ResilientKdbConnection:
         self._conn: Any = None
 
     def connect(self) -> None:
-        """Establish connection with retry."""
+        """Establish connection with retry (a missing pykx is not retried)."""
+        import pykx as kx
+
         for attempt in range(self.max_retries):
             try:
-                import pykx as kx
-
                 self._conn = kx.QConnection(
                     host=self.host,
                     port=self.port,
@@ -78,11 +77,20 @@ class ResilientKdbConnection:
             logger.info("Disconnected from kdb+")
 
     def query(self, expr: str) -> Any:
-        """Execute query with auto-reconnect on failure."""
+        """Execute query; reconnect and retry if the connection was lost.
+
+        q evaluation errors propagate: re-running ``expr`` could repeat side effects.
+        Any other failure (pykx raises a bare RuntimeError for a closed IPC link) is
+        treated as a lost connection.
+        """
+        import pykx as kx
+
         if self._conn is None:
             self.connect()
         try:
             return self._conn(expr)
+        except kx.QError:
+            raise
         except Exception:
             logger.warning("kdb+ connection lost, reconnecting...")
             self._conn = None
@@ -108,7 +116,7 @@ class KdbDataLoader:
             host=self.config.host,
             port=target_port,
             username=self.config.username,
-            password=self.config.password,
+            password=self.config.password.get_secret_value(),
             timeout=self.config.timeout / 1000.0,
         )
         self._resilient_conn.connect()
@@ -197,7 +205,7 @@ class KdbDataLoader:
             symbol: Trading symbol (e.g. 'BTCUSDT').
             start_date: Start of date range.
             end_date: End of date range.
-            interval: Bar interval ('1m', '5m', '15m', '1h', '1d').
+            interval: Bar interval ('1m', '5m', '15m', '1h', '4h').
 
         Returns:
             DataFrame with columns: timestamp, open, high, low, close, volume

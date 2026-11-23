@@ -28,7 +28,7 @@ def validate_symbol(symbol: str) -> None:
     if not symbol:
         raise ValueError("Invalid symbol format: symbol cannot be empty")
 
-    if not re.match(r"^[A-Z][A-Z0-9]{0,19}$", symbol):
+    if not re.fullmatch(r"[A-Z][A-Z0-9]{0,19}", symbol):
         raise ValueError(
             f"Invalid symbol format: '{symbol}' must be uppercase alphanumeric, "
             "1-20 characters, cannot start with digit"

@@ -14,6 +14,7 @@ try:
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import (
         GetOrdersRequest,
+        GetPortfolioHistoryRequest,
         MarketOrderRequest,
     )
 
@@ -21,6 +22,23 @@ try:
 except ImportError:
     ALPACA_TRADING_AVAILABLE = False
     logger.warning("alpaca-py trading module not installed - AlpacaPaperClient unavailable")
+
+
+def _normalize_side(side: str) -> str:
+    side = side.lower()
+    if side not in ("buy", "sell"):
+        raise ValueError(f"Unsupported side: {side!r}. Use 'buy' or 'sell'")
+    return side
+
+
+# Alpaca's period tokens are number + D/W/M/A (A = year); "1Y" is accepted as an alias.
+_PERIODS = ("1D", "1W", "1M", "3M", "1Y", "1A")
+
+
+def _normalize_period(period: str) -> str:
+    if period not in _PERIODS:
+        raise ValueError(f"Unsupported period: {period!r}. Use one of: {list(_PERIODS)}")
+    return period
 
 
 class AlpacaPaperClient:
@@ -82,7 +100,7 @@ class AlpacaPaperClient:
             Dictionary with order details (id, status, filled_qty, etc.)
         """
         # Map strings to enums
-        side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+        side_enum = OrderSide.BUY if _normalize_side(side) == "buy" else OrderSide.SELL
         tif_map = {
             "day": TimeInForce.DAY,
             "gtc": TimeInForce.GTC,
@@ -220,28 +238,15 @@ class AlpacaPaperClient:
         """Get portfolio equity history.
 
         Args:
-            period: Time period ("1D", "1W", "1M", "3M", "1Y", "all")
+            period: Time period ("1D", "1W", "1M", "3M", "1Y" or "1A")
             timeframe: Sampling interval ("1Min", "5Min", "15Min", "1H", "1D")
 
         Returns:
             DataFrame with columns: timestamp, equity, profit_loss, profit_loss_pct
         """
-        from alpaca.trading.enums import PortfolioHistoryPeriod
-
-        period_map = {
-            "1D": PortfolioHistoryPeriod.DAY_1,
-            "1W": PortfolioHistoryPeriod.WEEK_1,
-            "1M": PortfolioHistoryPeriod.MONTH_1,
-            "3M": PortfolioHistoryPeriod.MONTH_3,
-            "1A": PortfolioHistoryPeriod.YEAR_1,
-            "all": PortfolioHistoryPeriod.ALL,
-        }
-
-        period_enum = period_map.get(period, PortfolioHistoryPeriod.MONTH_1)
-
+        token = _normalize_period(period).replace("1Y", "1A")
         history = self.client.get_portfolio_history(
-            period=period_enum,
-            timeframe=timeframe,
+            history_filter=GetPortfolioHistoryRequest(period=token, timeframe=timeframe)
         )
 
         # Convert to DataFrame

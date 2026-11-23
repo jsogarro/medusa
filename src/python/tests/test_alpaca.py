@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pandas as pd
 import pytest
+from pydantic import SecretStr
 
 
 class TestAlpacaHistoricalLoader:
@@ -142,7 +143,7 @@ class TestEquityKdbLoader:
             mock_config.kdb.host = "localhost"
             mock_config.kdb.hdb_port = 5012
             mock_config.kdb.username = None
-            mock_config.kdb.password = None
+            mock_config.kdb.password = SecretStr("")
             mock_config.kdb.timeout = 10000
             mock_settings.return_value = mock_config
 

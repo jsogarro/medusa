@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +17,7 @@ class KdbConfig(BaseModel):
     rdb_port: int = 5011
     tp_port: int = 5010
     username: str = ""
-    password: str = ""
+    password: SecretStr = SecretStr("")
     timeout: int = 30000
 
 
