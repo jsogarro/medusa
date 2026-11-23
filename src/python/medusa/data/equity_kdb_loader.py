@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import random
 import re
-import time
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
 from loguru import logger
 
+from medusa.data.kdb_loader import ResilientKdbConnection
 from medusa.data.q_safe import TIMEFRAMES, q_choice
 from medusa.utils.config import KdbConfig, get_settings
 
@@ -28,72 +27,6 @@ def _validate_equity_symbol(symbol: str) -> str:
     if not symbol.isalpha():
         raise ValueError(f"Symbol contains non-alphabetic characters: {symbol!r}")
     return symbol.upper()
-
-
-class ResilientKdbConnection:
-    """Wrapper around PyKX connection with auto-reconnect and query retry."""
-
-    def __init__(
-        self,
-        host: str = "localhost",
-        port: int = 5011,
-        username: str | None = None,
-        password: str | None = None,
-        timeout: float = 5.0,
-        max_retries: int = 3,
-    ):
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-        self.timeout = timeout
-        self.max_retries = max_retries
-        self._conn: Any = None
-
-    def connect(self) -> None:
-        """Establish connection with retry."""
-        for attempt in range(self.max_retries):
-            try:
-                import pykx as kx
-
-                self._conn = kx.QConnection(
-                    host=self.host,
-                    port=self.port,
-                    username=self.username,
-                    password=self.password,
-                    timeout=self.timeout,
-                )
-                logger.info(f"Connected to kdb+ at {self.host}:{self.port}")
-                return
-            except Exception as e:
-                wait = 2**attempt + random.uniform(0, 1)
-                logger.warning(
-                    f"kdb+ connection failed (attempt {attempt + 1}/{self.max_retries}): {e}, "
-                    f"retrying in {wait:.1f}s"
-                )
-                time.sleep(wait)
-        raise ConnectionError(
-            f"Failed to connect to kdb+ at {self.host}:{self.port} after {self.max_retries} attempts"
-        )
-
-    def disconnect(self) -> None:
-        """Close connection."""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
-            logger.info("Disconnected from kdb+")
-
-    def query(self, expr: str) -> Any:
-        """Execute query with auto-reconnect on failure."""
-        if self._conn is None:
-            self.connect()
-        try:
-            return self._conn(expr)
-        except Exception:
-            logger.warning("kdb+ connection lost, reconnecting...")
-            self._conn = None
-            self.connect()
-            return self._conn(expr)
 
 
 class EquityKdbLoader:

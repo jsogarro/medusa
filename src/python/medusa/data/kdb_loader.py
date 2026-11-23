@@ -44,11 +44,11 @@ class ResilientKdbConnection:
         self._conn: Any = None
 
     def connect(self) -> None:
-        """Establish connection with retry."""
+        """Establish connection with retry (a missing pykx is not retried)."""
+        import pykx as kx
+
         for attempt in range(self.max_retries):
             try:
-                import pykx as kx
-
                 self._conn = kx.QConnection(
                     host=self.host,
                     port=self.port,
@@ -77,12 +77,15 @@ class ResilientKdbConnection:
             logger.info("Disconnected from kdb+")
 
     def query(self, expr: str) -> Any:
-        """Execute query with auto-reconnect on failure."""
+        """Execute query; reconnect and retry only if the connection was lost.
+
+        q evaluation errors propagate: re-running ``expr`` could repeat side effects.
+        """
         if self._conn is None:
             self.connect()
         try:
             return self._conn(expr)
-        except Exception:
+        except (OSError, EOFError):
             logger.warning("kdb+ connection lost, reconnecting...")
             self._conn = None
             self.connect()

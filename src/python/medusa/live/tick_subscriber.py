@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -10,6 +11,8 @@ from loguru import logger
 
 from medusa.data.q_safe import q_ident
 from medusa.utils.config import get_settings
+
+_IDLE_SLEEP_S = 0.001
 
 
 class TickSubscriber:
@@ -106,8 +109,10 @@ class TickSubscriber:
                     if msg is not None:
                         table_name, update_data = msg
                         self.on_update(str(table_name), update_data)
+                        continue
                 except Exception as e:
                     logger.error(f"Error processing TP message: {e}")
+                time.sleep(_IDLE_SLEEP_S)  # nothing pending (or failed): don't spin a core
         except KeyboardInterrupt:
             logger.info("Stopped TP listener")
             self.disconnect()

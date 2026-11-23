@@ -548,7 +548,7 @@ class TestEquityKdbLoader:
         conn = ResilientKdbConnection()
 
         # Create two separate mock connections
-        mock_conn1 = MagicMock(side_effect=Exception("Connection lost"))
+        mock_conn1 = MagicMock(side_effect=ConnectionError("Connection lost"))
         mock_conn2 = MagicMock(return_value="result")
 
         # Track which connection should be used
