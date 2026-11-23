@@ -64,12 +64,6 @@ impl ExchangeSubscriber {
 
         let (mut write, mut read) = ws_stream.split();
 
-        // Bootstrap orderbooks via REST (ONE-TIME snapshot per symbol)
-        info!("Bootstrapping orderbooks via REST for {}", self.config.name);
-        let mut state = OrderbookState::new();
-        self.bootstrap_orderbooks(adapter.as_ref(), &mut state)
-            .await?;
-
         // Subscribe to WebSocket orderbook channels
         for symbol in &self.config.symbols {
             let sub_msg = adapter.build_subscribe_message(std::slice::from_ref(symbol));
@@ -83,6 +77,15 @@ impl ExchangeSubscriber {
                 );
             }
         }
+
+        // Bootstrap orderbooks via REST (ONE-TIME snapshot per symbol). This runs after
+        // subscribing: diffs that arrive meanwhile queue on the socket and are applied
+        // below with the venue's ordering rule, so none is lost between snapshot and
+        // subscription (Bitstamp sends no snapshot on subscribe).
+        info!("Bootstrapping orderbooks via REST for {}", self.config.name);
+        let mut state = OrderbookState::new();
+        self.bootstrap_orderbooks(adapter.as_ref(), &mut state)
+            .await?;
 
         // Health monitor
         let mut health = HealthMonitor::new(self.health_timeout);
@@ -147,6 +150,13 @@ impl ExchangeSubscriber {
                             }
 
                             self.publish_orderbook(&state, &symbol).await?;
+                        }
+                        Ok(ExchangeMessage::Gap) => {
+                            warn!(
+                                "{} message sequence gap, reconnecting to resync",
+                                self.config.name
+                            );
+                            break;
                         }
                         Ok(ExchangeMessage::Heartbeat) => {
                             debug!("{} heartbeat", self.config.name);
@@ -335,6 +345,67 @@ mod tests {
         assert!(
             matches!(second, Ok(Some(()))),
             "a feed that goes silent must be treated as a lost connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribes_before_fetching_the_rest_snapshot() {
+        use futures_util::StreamExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_port = ws.local_addr().unwrap().port();
+        let ws_tx = tx.clone();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = ws.accept().await {
+                if let Ok(mut s) = tokio_tungstenite::accept_async(sock).await {
+                    if let Some(Ok(Message::Text(_))) = s.next().await {
+                        let _ = ws_tx.send("subscribe");
+                    }
+                    std::future::pending::<()>().await;
+                }
+            }
+        });
+        let rest = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rest_port = rest.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = rest.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = tx.send("snapshot");
+                let body =
+                    r#"{"timestamp":1,"microtimestamp":"1","bids":[["1","1"]],"asks":[["2","1"]]}"#;
+                let _ = sock
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+
+        let config = ExchangeConfig {
+            name: "bitstamp".to_string(),
+            ws_url: format!("ws://127.0.0.1:{}", ws_port),
+            rest_url: format!("http://127.0.0.1:{}", rest_port),
+            symbols: vec!["btcusd".to_string()],
+            enabled: true,
+        };
+        let publisher = KdbPublisher::lazy("127.0.0.1", 1, "", "");
+        let mut sub = ExchangeSubscriber::new(config, publisher, Duration::from_secs(30));
+        let run = tokio::spawn(async move { sub.run().await });
+
+        let first = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        run.abort();
+        assert!(
+            matches!(first, Ok(Some("subscribe"))),
+            "diffs sent between the snapshot and the subscription are lost unless the \
+             subscription comes first, got {first:?}"
         );
     }
 }

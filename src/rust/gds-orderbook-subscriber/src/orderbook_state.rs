@@ -117,6 +117,20 @@ impl ManagedOrderbook {
         }
 
         self.sequence = last;
+
+        // Venue-independent safety net: a crossed book is corrupt however the
+        // venue numbers its updates. The caller re-bootstraps on Err.
+        if let (Some((&bid, _)), Some((&ask, _))) =
+            (self.bids.iter().next_back(), self.asks.iter().next())
+        {
+            if bid >= ask {
+                return Err(anyhow::anyhow!(
+                    "Crossed book: best bid {} >= best ask {}",
+                    key_to_price(bid),
+                    key_to_price(ask)
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -458,5 +472,26 @@ mod tests {
             .apply_update("BTCUSD", vec![], vec![], Some(106), 110)
             .is_ok());
         assert_eq!(state.get("BTCUSD").unwrap().sequence, 110);
+    }
+
+    #[test]
+    fn test_update_that_crosses_the_book_is_an_error() {
+        for first in [None, Some(11)] {
+            let mut book = ManagedOrderbook::new();
+            book.apply_snapshot(vec![[100.0, 1.0]], vec![[101.0, 1.0]], 10);
+            // A bid at the best ask: the book is corrupt, whatever the venue's ids say.
+            assert!(book
+                .apply_update(vec![[101.0, 1.0]], vec![], first, 11)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn test_one_sided_book_is_not_crossed() {
+        let mut book = ManagedOrderbook::new();
+        book.apply_snapshot(vec![[100.0, 1.0]], vec![], 10);
+        assert!(book
+            .apply_update(vec![[100.5, 1.0]], vec![], None, 11)
+            .is_ok());
     }
 }
