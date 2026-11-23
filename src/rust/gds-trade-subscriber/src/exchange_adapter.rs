@@ -784,56 +784,86 @@ impl TradeAdapter for KrakenTradeAdapter {
                 .as_array()
                 .ok_or_else(|| anyhow!("Trades value is not an array"))?;
 
-            for trade_data in trades_arr {
+            for (index, trade_data) in trades_arr.iter().enumerate() {
                 let trade_arr = trade_data
                     .as_array()
                     .ok_or_else(|| anyhow!("Trade is not an array"))?;
 
-                if trade_arr.len() < 6 {
-                    continue;
+                match parse_kraken_rest_trade(symbol, index, trade_arr) {
+                    Ok(trade) => all_trades.push(trade),
+                    Err(e) => warn!("Skipping malformed Kraken REST trade: {}", e),
                 }
-
-                let price_str = trade_arr[0].as_str().unwrap_or("0");
-                let volume_str = trade_arr[1].as_str().unwrap_or("0");
-                let time_f64 = trade_arr[2].as_f64().unwrap_or(0.0);
-                let side_str = trade_arr[3].as_str().unwrap_or("b");
-
-                let price = price_str.parse::<f64>().unwrap_or(0.0);
-                let quantity = volume_str.parse::<f64>().unwrap_or(0.0);
-
-                let side = if side_str == "b" {
-                    Side::Buy
-                } else {
-                    Side::Sell
-                };
-
-                let timestamp_secs = time_f64.trunc() as i64;
-                let nanos_raw = (time_f64.fract() * 1_000_000_000.0) as u32;
-                let timestamp_nanos = nanos_raw.min(999_999_999);
-
-                if nanos_raw > 999_999_999 {
-                    warn!("Kraken REST timestamp nanoseconds clamped from {} to 999999999 (malformed data)", nanos_raw);
-                }
-
-                let dt = DateTime::from_timestamp(timestamp_secs, timestamp_nanos)
-                    .ok_or_else(|| anyhow!("Invalid timestamp"))?;
-
-                let trade_id = format!("{}_{}", timestamp_secs, timestamp_nanos);
-
-                all_trades.push(NormalizedTrade {
-                    exchange: "kraken".to_string(),
-                    symbol: symbol.to_string(),
-                    trade_id,
-                    price,
-                    quantity,
-                    side,
-                    timestamp: dt,
-                });
             }
         }
 
         Ok(all_trades)
     }
+}
+
+/// Parse one Kraken REST trade `[price, volume, time, side, type, misc, trade_id]`.
+///
+/// Unparsable or non-positive price/volume is an error rather than a zero, so a
+/// malformed row never reaches the Tickerplant. The id is the venue's trade id
+/// when present, otherwise timestamp plus the row index (unique within a response).
+fn parse_kraken_rest_trade(
+    symbol: &str,
+    index: usize,
+    trade_arr: &[serde_json::Value],
+) -> Result<NormalizedTrade> {
+    if trade_arr.len() < 6 {
+        return Err(anyhow!(
+            "Trade has {} fields, expected at least 6",
+            trade_arr.len()
+        ));
+    }
+
+    let positive = |v: &serde_json::Value, what: &str| -> Result<f64> {
+        v.as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|n| n.is_finite() && *n > 0.0)
+            .ok_or_else(|| anyhow!("Invalid {}: {}", what, v))
+    };
+    let price = positive(&trade_arr[0], "price")?;
+    let quantity = positive(&trade_arr[1], "volume")?;
+    let time_f64 = trade_arr[2]
+        .as_f64()
+        .filter(|t| t.is_finite() && *t > 0.0)
+        .ok_or_else(|| anyhow!("Invalid time: {}", trade_arr[2]))?;
+
+    let side = if trade_arr[3].as_str() == Some("b") {
+        Side::Buy
+    } else {
+        Side::Sell
+    };
+
+    let timestamp_secs = time_f64.trunc() as i64;
+    let nanos_raw = (time_f64.fract() * 1_000_000_000.0) as u32;
+    let timestamp_nanos = nanos_raw.min(999_999_999);
+
+    if nanos_raw > 999_999_999 {
+        warn!(
+            "Kraken REST timestamp nanoseconds clamped from {} to 999999999 (malformed data)",
+            nanos_raw
+        );
+    }
+
+    let timestamp = DateTime::from_timestamp(timestamp_secs, timestamp_nanos)
+        .ok_or_else(|| anyhow!("Invalid timestamp"))?;
+
+    let trade_id = match trade_arr.get(6).and_then(|id| id.as_u64()) {
+        Some(id) => id.to_string(),
+        None => format!("{}_{}_{}", timestamp_secs, timestamp_nanos, index),
+    };
+
+    Ok(NormalizedTrade {
+        exchange: "kraken".to_string(),
+        symbol: symbol.to_string(),
+        trade_id,
+        price,
+        quantity,
+        side,
+        timestamp,
+    })
 }
 
 #[cfg(test)]
@@ -956,5 +986,51 @@ mod tests {
         let msg = adapter.build_subscribe_message(&["XBT/USD".to_string()]);
         assert!(msg.contains("trade"));
         assert!(msg.contains("XBT/USD"));
+    }
+
+    #[test]
+    fn test_kraken_rest_rejects_unparsable_or_non_positive_numbers() {
+        let row = |p: &str, v: &str| {
+            vec![
+                serde_json::json!(p),
+                serde_json::json!(v),
+                serde_json::json!(1640000000.5),
+                serde_json::json!("b"),
+                serde_json::json!("l"),
+                serde_json::json!(""),
+            ]
+        };
+        assert!(parse_kraken_rest_trade("XBT/USD", 0, &row("abc", "1.0")).is_err());
+        assert!(parse_kraken_rest_trade("XBT/USD", 0, &row("0", "1.0")).is_err());
+        assert!(parse_kraken_rest_trade("XBT/USD", 0, &row("100.0", "")).is_err());
+        assert!(parse_kraken_rest_trade("XBT/USD", 0, &row("NaN", "1.0")).is_err());
+        assert!(parse_kraken_rest_trade("XBT/USD", 0, &row("100.0", "-1")).is_err());
+        let ok = parse_kraken_rest_trade("XBT/USD", 0, &row("100.0", "1.0")).unwrap();
+        assert_eq!(ok.price, 100.0);
+    }
+
+    #[test]
+    fn test_kraken_rest_trade_ids_do_not_collide_within_one_instant() {
+        let same_instant = |id: Option<u64>| {
+            let mut r = vec![
+                serde_json::json!("100.0"),
+                serde_json::json!("1.0"),
+                serde_json::json!(1640000000.5),
+                serde_json::json!("b"),
+                serde_json::json!("l"),
+                serde_json::json!(""),
+            ];
+            if let Some(id) = id {
+                r.push(serde_json::json!(id));
+            }
+            r
+        };
+        // No venue id: the row index disambiguates.
+        let a = parse_kraken_rest_trade("XBT/USD", 0, &same_instant(None)).unwrap();
+        let b = parse_kraken_rest_trade("XBT/USD", 1, &same_instant(None)).unwrap();
+        assert_ne!(a.trade_id, b.trade_id);
+        // Venue id wins, matching the id the WebSocket feed uses.
+        let c = parse_kraken_rest_trade("XBT/USD", 0, &same_instant(Some(42))).unwrap();
+        assert_eq!(c.trade_id, "42");
     }
 }
