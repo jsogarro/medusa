@@ -50,6 +50,9 @@ impl std::fmt::Debug for BitstampClient {
     }
 }
 
+/// Order endpoint path and its unauthenticated form fields.
+type OrderEndpoint = (String, Vec<(&'static str, String)>);
+
 impl BitstampClient {
     /// Create a new Bitstamp client
     ///
@@ -83,9 +86,7 @@ impl BitstampClient {
     }
 
     /// Build the order endpoint and its (unauthenticated) form fields.
-    fn build_order_request(
-        order: &Order,
-    ) -> Result<(String, Vec<(&'static str, String)>), ExchangeError> {
+    fn build_order_request(order: &Order) -> Result<OrderEndpoint, ExchangeError> {
         let pair = Self::normalize_pair(&order.pair);
         let endpoint = match (order.side, order.order_type) {
             (Side::Buy, OrderType::Limit) => format!("/buy/{}/", pair),

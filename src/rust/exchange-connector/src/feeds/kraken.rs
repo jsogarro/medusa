@@ -4,7 +4,7 @@
 
 use crate::client::{parse_side, ExchangeError};
 use crate::feeds::check_trade;
-use crate::types::{OrderBook, PriceLevel, Side, Trade};
+use crate::types::{OrderBook, PriceLevel, Trade};
 use crate::websocket::{ReconnectConfig, WebSocketClient, WsConfig, WsMessage};
 use chrono::Utc;
 use serde::Serialize;
@@ -245,6 +245,7 @@ struct KrakenSubscriptionParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Side;
 
     #[test]
     fn test_parse_orderbook_v2() {

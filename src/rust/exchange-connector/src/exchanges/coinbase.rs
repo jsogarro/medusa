@@ -1711,7 +1711,7 @@ mod tests {
             .as_secs();
         let last = (0..500)
             .map(|_| CoinbaseClient::get_timestamp())
-            .last()
+            .next_back()
             .unwrap();
         assert!(
             last <= wall + 2,
