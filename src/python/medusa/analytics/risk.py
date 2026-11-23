@@ -39,13 +39,10 @@ class RiskAnalytics:
     ) -> float:
         """Annualized Sortino ratio (downside deviation only)."""
         excess = returns - risk_free_rate / periods
-        downside = excess[excess < 0]
-        if len(downside) == 0:
+        downside_dev = float(np.sqrt((np.minimum(excess, 0.0) ** 2).mean()))
+        if downside_dev == 0 or np.isnan(downside_dev):
             return float("nan")
-        std = downside.std()
-        if std == 0 or np.isnan(std):
-            return float("nan")
-        return float(excess.mean() / std * np.sqrt(periods))
+        return float(excess.mean() / downside_dev * np.sqrt(periods))
 
     @staticmethod
     def max_drawdown(returns: pd.Series) -> float:
@@ -58,7 +55,9 @@ class RiskAnalytics:
     @staticmethod
     def calmar_ratio(returns: pd.Series, periods: int = 252) -> float:
         """Calmar ratio (CAGR / max drawdown)."""
-        ann_return = float(returns.mean() * periods)
+        if len(returns) == 0:
+            return float("nan")
+        ann_return = float((1 + returns).prod() ** (periods / len(returns)) - 1)
         mdd = RiskAnalytics.max_drawdown(returns)
         if mdd == 0 or np.isnan(mdd):
             return float("nan")
@@ -99,23 +98,27 @@ class RiskAnalytics:
     def full_report(
         returns: pd.Series,
         risk_free_rate: float = 0.0,
+        periods: int = 252,
     ) -> dict[str, Any]:
         """Generate comprehensive risk report.
+
+        Args:
+            periods: Bars per year (252 for equities, 365 for 24/7 crypto on daily bars).
 
         Returns:
             Dictionary with all risk metrics.
         """
         report = {
-            "sharpe_ratio": RiskAnalytics.sharpe_ratio(returns, risk_free_rate),
-            "sortino_ratio": RiskAnalytics.sortino_ratio(returns, risk_free_rate),
+            "sharpe_ratio": RiskAnalytics.sharpe_ratio(returns, risk_free_rate, periods),
+            "sortino_ratio": RiskAnalytics.sortino_ratio(returns, risk_free_rate, periods),
             "max_drawdown": RiskAnalytics.max_drawdown(returns),
-            "calmar_ratio": RiskAnalytics.calmar_ratio(returns),
+            "calmar_ratio": RiskAnalytics.calmar_ratio(returns, periods),
             "var_95": RiskAnalytics.var(returns, 0.95),
             "var_99": RiskAnalytics.var(returns, 0.99),
             "cvar_95": RiskAnalytics.cvar(returns, 0.95),
             "cvar_99": RiskAnalytics.cvar(returns, 0.99),
-            "annualized_return": float(returns.mean() * 252),
-            "annualized_volatility": float(returns.std() * np.sqrt(252)),
+            "annualized_return": float((1 + returns).prod() ** (periods / len(returns)) - 1),
+            "annualized_volatility": float(returns.std() * np.sqrt(periods)),
             "skewness": float(returns.skew()),
             "kurtosis": float(returns.kurtosis()),
             "positive_days": int((returns > 0).sum()),

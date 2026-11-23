@@ -31,8 +31,8 @@ class VectorBTEngine:
 
         # Asset-class specific defaults
         if asset_class == "equity":
-            # Alpaca: $0 commission for stocks
-            self.commission = 0.0
+            # Alpaca: $0 commission for stocks unless explicitly overridden
+            self.commission = commission if commission is not None else 0.0
             # Equity slippage model: ~2 basis points
             self.slippage = slippage if slippage is not None else 0.0002
         else:
@@ -88,6 +88,15 @@ class VectorBTEngine:
         filtered[~mask] = False
         return filtered
 
+    @staticmethod
+    def _as_signal(signal: Any, price: pd.Series | pd.DataFrame) -> pd.Series | pd.DataFrame:
+        """Return ``signal`` as a pandas object on the price index (arrays and lists included)."""
+        if isinstance(signal, (pd.Series, pd.DataFrame)):
+            return signal
+        if isinstance(price, pd.DataFrame):
+            return pd.DataFrame(signal, index=price.index, columns=price.columns)
+        return pd.Series(np.asarray(signal), index=price.index)
+
     def run_signals(
         self,
         price: pd.Series | pd.DataFrame,
@@ -109,15 +118,24 @@ class VectorBTEngine:
         """
         import vectorbt as vbt
 
+        # A signal computed from bar t's close cannot fill at bar t's close:
+        # act on the next bar (fills at that bar's close). Short signals passed
+        # via kwargs get the same treatment.
+        signals = {"entries": entries, "exits": exits}
+        for name in ("short_entries", "short_exits"):
+            if name in kwargs:
+                signals[name] = kwargs.pop(name)
+        signals = {
+            k: self._as_signal(v, price).shift(1, fill_value=False) for k, v in signals.items()
+        }
+
         # Filter signals by market hours (equity only)
         if self.asset_class == "equity":
-            entries = self._filter_market_hours(entries, extended_hours)
-            exits = self._filter_market_hours(exits, extended_hours)
+            signals = {k: self._filter_market_hours(v, extended_hours) for k, v in signals.items()}
 
         portfolio = vbt.Portfolio.from_signals(
             close=price,
-            entries=entries,
-            exits=exits,
+            **signals,
             init_cash=self.initial_capital,
             fees=self.commission,
             slippage=self.slippage,
@@ -125,6 +143,23 @@ class VectorBTEngine:
         )
         logger.info(f"Backtest complete: Return={portfolio.total_return():.2%}")
         return portfolio
+
+    def run_strategy(
+        self,
+        price: pd.Series | pd.DataFrame,
+        strategy: Any,
+        data: pd.DataFrame,
+        **kwargs: Any,
+    ) -> Any:
+        """Backtest a strategy, including its short signals when it has any.
+
+        Strategies exposing ``generate_short_signals(data) -> (short_entries, short_exits)``
+        have them passed to ``run_signals`` as ``short_entries``/``short_exits``.
+        """
+        entries, exits = strategy.generate_signals(data)
+        if hasattr(strategy, "generate_short_signals"):
+            kwargs["short_entries"], kwargs["short_exits"] = strategy.generate_short_signals(data)
+        return self.run_signals(price, entries, exits, **kwargs)
 
     def run_orders(
         self,

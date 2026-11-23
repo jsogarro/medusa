@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from medusa.features.cross_asset_features import (
@@ -50,7 +51,7 @@ class PairsTradingStrategy(BaseStrategy):
             stop_zscore: Z-score for stop loss (±). Default 3.0.
             lookback: Days of history for cointegration test. Default 252.
             spread_window: Rolling window for spread z-score. Default 60.
-            retest_period: Days between cointegration re-tests. Default 30.
+            retest_period: Bars between cointegration re-fits. Default 30.
         """
         self.asset1 = asset1
         self.asset2 = asset2
@@ -65,35 +66,35 @@ class PairsTradingStrategy(BaseStrategy):
         self._last_retest_date: pd.Timestamp | None = None
         self._is_cointegrated = False
 
-    def _update_cointegration(
-        self,
-        price1: pd.Series,
-        price2: pd.Series,
-    ) -> None:
-        """Run cointegration test and update hedge ratio.
+    def _rolling_hedge_ratio(self, price1: pd.Series, price2: pd.Series) -> pd.Series:
+        """Walk-forward hedge ratio: each bar uses only data before it.
 
-        Args:
-            price1: First asset price series.
-            price2: Second asset price series.
+        The cointegration test is refit every ``retest_period`` bars on the
+        trailing ``lookback`` bars; the result applies from the next bar on.
+        Bars before the first fit, and bars in a non-cointegrated segment, are NaN.
         """
-        result = cointegration_test(price1, price2, significance=0.05)
-        self._is_cointegrated = result.is_cointegrated
-        self._hedge_ratio = result.hedge_ratio if result.is_cointegrated else None
-        self._last_retest_date = price1.index[-1]
+        ratio = pd.Series(np.nan, index=price1.index)
+        step = max(self.retest_period, 1)
+        for end in range(self.lookback, len(price1), step):
+            result = cointegration_test(
+                price1.iloc[end - self.lookback : end],
+                price2.iloc[end - self.lookback : end],
+                significance=0.05,
+            )
+            self._is_cointegrated = result.is_cointegrated
+            self._last_retest_date = price1.index[end - 1]
+            if result.is_cointegrated:
+                ratio.iloc[end : end + step] = result.hedge_ratio
+        return ratio
 
-    def generate_signals(
-        self,
-        data: pd.DataFrame,
-    ) -> tuple[pd.Series, pd.Series]:
-        """Generate entry/exit signals from dual-asset data.
+    def _spread_signals(
+        self, data: pd.DataFrame
+    ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+        """Return (long entries, long exits, short entries, short exits) for the spread.
 
-        Args:
-            data: DataFrame with MultiIndex columns (asset, field).
-                  Example: columns = [('BTC', 'close'), ('ETH', 'close')]
-                  OR DataFrame with 'close_asset1', 'close_asset2' columns.
-
-        Returns:
-            Tuple of (entries, exits) as boolean Series.
+        Long spread (buy asset1) opens at z < -entry; short spread (sell asset1) at z > +entry.
+        A position always has a way out: whenever the spread is undefined (no hedge ratio,
+        e.g. cointegration broke) both exit series fire.
         """
         # Extract price series for both assets
         if isinstance(data.columns, pd.MultiIndex):
@@ -106,52 +107,57 @@ class PairsTradingStrategy(BaseStrategy):
 
         # Guard against missing columns
         if price1 is None or price2 is None:
-            return (
-                pd.Series(False, index=data.index),
-                pd.Series(False, index=data.index),
-            )
+            none = pd.Series(False, index=data.index)
+            return none, none, none, none
 
-        # Test cointegration if not tested or retest period elapsed
-        should_retest = (
-            self._hedge_ratio is None
-            or self._last_retest_date is None
-            or (price1.index[-1] - self._last_retest_date).days >= self.retest_period
-        )
+        hedge_ratio = self._rolling_hedge_ratio(price1, price2)
+        valid = hedge_ratio.notna()
+        self._hedge_ratio = float(hedge_ratio[valid].iloc[-1]) if valid.any() else None
 
-        if should_retest and len(price1) >= self.lookback:
-            self._update_cointegration(
-                price1.iloc[-self.lookback :],
-                price2.iloc[-self.lookback :],
-            )
+        # If never cointegrated, no trading
+        if not valid.any():
+            none = pd.Series(False, index=data.index)
+            return none, none, none, none
 
-        # If not cointegrated, no trading
-        if not self._is_cointegrated or self._hedge_ratio is None:
-            return (
-                pd.Series(False, index=data.index),
-                pd.Series(False, index=data.index),
-            )
-
-        # Calculate spread and z-score
-        spread_series = spread(price1, price2, self._hedge_ratio)
+        # Spread uses the hedge ratio in force at each bar (no look-ahead)
+        spread_series = price1 - hedge_ratio * price2
         zscore = z_score_spread(spread_series, window=self.spread_window)
 
-        # Entry signals
-        # Long spread (buy asset1, sell asset2) when z < -entry_zscore
-        long_spread_entry = zscore < -self.entry_zscore
-        # Short spread (sell asset1, buy asset2) when z > +entry_zscore
-        short_spread_entry = zscore > self.entry_zscore
-
-        entries = long_spread_entry | short_spread_entry
-
-        # Exit signals
-        # Mean reversion: z-score crosses zero
-        mean_reversion = zscore.abs() < self.exit_zscore
-        # Stop loss: z-score exceeds stop threshold (cointegration breakdown)
+        undefined = zscore.isna()
+        # Stop loss: z-score beyond the stop threshold (cointegration breakdown); no entry there
         stop_loss = zscore.abs() > self.stop_zscore
+        tradable = valid & ~undefined & ~stop_loss
 
-        exits = mean_reversion | stop_loss
+        long_entries = (zscore < -self.entry_zscore) & tradable
+        short_entries = (zscore > self.entry_zscore) & tradable
+        # Mean reversion: z-score is back at the exit level (zero by default) from its entry side
+        long_exits = (zscore >= -self.exit_zscore) | stop_loss | undefined
+        short_exits = (zscore <= self.exit_zscore) | stop_loss | undefined
 
-        return entries, exits
+        return long_entries, long_exits, short_entries, short_exits
+
+    def generate_signals(
+        self,
+        data: pd.DataFrame,
+    ) -> tuple[pd.Series, pd.Series]:
+        """Generate long-spread entry/exit signals from dual-asset data.
+
+        Args:
+            data: DataFrame with MultiIndex columns (asset, field).
+                  Example: columns = [('BTC', 'close'), ('ETH', 'close')]
+                  OR DataFrame with 'close_asset1', 'close_asset2' columns.
+
+        Returns:
+            Tuple of (long entries, long exits) as boolean Series. Short-spread signals
+            come from ``generate_short_signals``.
+        """
+        long_entries, long_exits, _, _ = self._spread_signals(data)
+        return long_entries, long_exits
+
+    def generate_short_signals(self, data: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        """Short-spread (sell asset1) entry/exit signals, for ``short_entries``/``short_exits``."""
+        _, _, short_entries, short_exits = self._spread_signals(data)
+        return short_entries, short_exits
 
     def generate_signal(
         self,
@@ -168,7 +174,7 @@ class PairsTradingStrategy(BaseStrategy):
         if len(data) < self.lookback + self.spread_window:
             return None  # Not enough data
 
-        entries, exits = self.generate_signals(data)
+        long_entries, long_exits, short_entries, short_exits = self._spread_signals(data)
 
         # Extract latest prices
         if isinstance(data.columns, pd.MultiIndex):
@@ -193,34 +199,40 @@ class PairsTradingStrategy(BaseStrategy):
         zscore = z_score_spread(spread_series, window=self.spread_window)
         latest_zscore = zscore.iloc[-1]
 
-        latest_entry = entries.iloc[-1]
-        latest_exit = exits.iloc[-1]
+        def fired(exits: pd.Series) -> bool:
+            return bool(exits.iloc[-1] and not exits.iloc[-2])
 
-        if latest_entry and not latest_exit:
-            # Determine direction based on z-score
-            if latest_zscore < -self.entry_zscore:
-                # Long spread: buy asset1, sell asset2
-                return {
-                    "action": "LONG_SPREAD",
-                    "asset1": self.asset1,
-                    "asset2": self.asset2,
-                    "price1": latest_price1,
-                    "price2": latest_price2,
-                    "hedge_ratio": self._hedge_ratio,
-                    "zscore": latest_zscore,
-                }
-            elif latest_zscore > self.entry_zscore:
-                # Short spread: sell asset1, buy asset2
-                return {
-                    "action": "SHORT_SPREAD",
-                    "asset1": self.asset1,
-                    "asset2": self.asset2,
-                    "price1": latest_price1,
-                    "price2": latest_price2,
-                    "hedge_ratio": self._hedge_ratio,
-                    "zscore": latest_zscore,
-                }
-        elif latest_exit:
+        # Exit signals are levels (true whenever flat-side z is past the exit); close only
+        # on the bar one flips on, or when the spread is stopped out / undefined.
+        close = (
+            (long_exits.iloc[-1] and short_exits.iloc[-1])
+            or fired(long_exits)
+            or fired(short_exits)
+        )
+
+        if long_entries.iloc[-1]:
+            # Long spread: buy asset1, sell asset2
+            return {
+                "action": "LONG_SPREAD",
+                "asset1": self.asset1,
+                "asset2": self.asset2,
+                "price1": latest_price1,
+                "price2": latest_price2,
+                "hedge_ratio": self._hedge_ratio,
+                "zscore": latest_zscore,
+            }
+        if short_entries.iloc[-1]:
+            # Short spread: sell asset1, buy asset2
+            return {
+                "action": "SHORT_SPREAD",
+                "asset1": self.asset1,
+                "asset2": self.asset2,
+                "price1": latest_price1,
+                "price2": latest_price2,
+                "hedge_ratio": self._hedge_ratio,
+                "zscore": latest_zscore,
+            }
+        if close:
             return {
                 "action": "CLOSE_SPREAD",
                 "asset1": self.asset1,
