@@ -67,7 +67,7 @@ def validate_symbol_strict(symbol: str | None, allow_underscore: bool = False) -
     # Pattern matching
     pattern = STRICT_SYMBOL_WITH_UNDERSCORE if allow_underscore else STRICT_SYMBOL
 
-    if not pattern.match(symbol):
+    if not pattern.fullmatch(symbol):
         allowed_chars = "[A-Z0-9_]" if allow_underscore else "[A-Z0-9]"
         raise ValueError(f"Invalid symbol: '{symbol}' — only {allowed_chars} allowed")
 

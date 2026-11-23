@@ -491,6 +491,11 @@ class TestValidationUtils:
             == "AAPL_C_150_20240101"
         )
 
+    @pytest.mark.parametrize("allow_underscore", [False, True])
+    def test_validate_symbol_strict_rejects_trailing_newline(self, allow_underscore: bool) -> None:
+        with pytest.raises(ValueError, match="only.*allowed"):
+            validation.validate_symbol_strict("AAPL\n", allow_underscore=allow_underscore)
+
     def test_validate_symbol_strict_invalid_chars(self) -> None:
         """Test invalid characters are rejected."""
         with pytest.raises(ValueError, match="only.*allowed"):
