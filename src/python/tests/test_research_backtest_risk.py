@@ -34,6 +34,30 @@ def test_run_signals_fills_on_bar_after_signal(monkeypatch):
     assert captured["exits"].tolist() == [False, False, False, False, True]
 
 
+def test_run_signals_also_delays_short_signals(monkeypatch):
+    captured = {}
+
+    class _Portfolio:
+        @staticmethod
+        def from_signals(**kw):
+            captured.update(kw)
+            return types.SimpleNamespace(total_return=lambda: 0.0)
+
+    monkeypatch.setitem(sys.modules, "vectorbt", types.SimpleNamespace(Portfolio=_Portfolio))
+    idx = pd.date_range("2024-01-01", periods=5, freq="D")
+    price = pd.Series(np.arange(5.0) + 100, index=idx)
+    none = pd.Series(False, index=idx)
+    short_in = pd.Series([False, True, False, False, False], index=idx)
+    short_out = pd.Series([False, False, False, True, False], index=idx)
+
+    VectorBTEngine(asset_class="crypto").run_signals(
+        price, none, none, short_entries=short_in, short_exits=short_out
+    )
+
+    assert captured["short_entries"].tolist() == [False, False, True, False, False]
+    assert captured["short_exits"].tolist() == [False, False, False, False, True]
+
+
 def test_equity_engine_honours_explicit_commission():
     assert VectorBTEngine(asset_class="equity", commission=0.001).commission == 0.001
     assert VectorBTEngine(asset_class="equity").commission == 0.0

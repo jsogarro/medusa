@@ -110,19 +110,21 @@ class VectorBTEngine:
         import vectorbt as vbt
 
         # A signal computed from bar t's close cannot fill at bar t's close:
-        # act on the next bar (fills at that bar's close).
-        entries = entries.shift(1, fill_value=False)
-        exits = exits.shift(1, fill_value=False)
+        # act on the next bar (fills at that bar's close). Short signals passed
+        # via kwargs get the same treatment.
+        signals = {"entries": entries, "exits": exits}
+        for name in ("short_entries", "short_exits"):
+            if name in kwargs:
+                signals[name] = kwargs.pop(name)
+        signals = {k: v.shift(1, fill_value=False) for k, v in signals.items()}
 
         # Filter signals by market hours (equity only)
         if self.asset_class == "equity":
-            entries = self._filter_market_hours(entries, extended_hours)
-            exits = self._filter_market_hours(exits, extended_hours)
+            signals = {k: self._filter_market_hours(v, extended_hours) for k, v in signals.items()}
 
         portfolio = vbt.Portfolio.from_signals(
             close=price,
-            entries=entries,
-            exits=exits,
+            **signals,
             init_cash=self.initial_capital,
             fees=self.commission,
             slippage=self.slippage,
