@@ -3,6 +3,7 @@ import { Button } from '../components/ui/button'
 import { AlertTriangle, PauseCircle } from 'lucide-react'
 import { useExchangesStore } from '../stores/exchanges'
 import { useStrategiesStore } from '../stores/strategies'
+import { pauseAllStrategies, runEmergencyStop } from '../lib/kdb-actions'
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts'
 
 export function Risk() {
@@ -11,15 +12,13 @@ export function Risk() {
 
   const handleKillSwitch = () => {
     if (confirm('KILL SWITCH: This will cancel ALL orders and close ALL positions across ALL exchanges. Continue?')) {
-      window.kdb.emergencyStop()
-        .then(() => alert('Kill switch activated - all positions closed'))
-        .catch((err: unknown) => alert(`Kill switch failed: ${err}`))
+      void runEmergencyStop(window.kdb).then((r) => alert(r.ok ? 'Kill switch activated' : r.message))
     }
   }
 
   const handlePauseAll = () => {
     if (confirm('Pause all strategies? This will stop new orders but keep existing positions.')) {
-      alert('All strategies paused')
+      void pauseAllStrategies(window.kdb, strategies.map((s) => s.name)).then((r) => alert(r.message))
     }
   }
 

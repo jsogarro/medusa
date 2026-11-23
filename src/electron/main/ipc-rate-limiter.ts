@@ -22,44 +22,45 @@ interface Bucket {
 
 export class IpcRateLimiter {
   private buckets = new Map<string, Bucket>()
-  private capacity: number
-  private refillRate: number
 
-  constructor(capacity: number = 100, refillRate: number = 10) {
-    this.capacity = capacity
-    this.refillRate = refillRate
+  constructor(
+    private capacity: number = 100,
+    private refillRate: number = 10,
+    private overrides: Record<string, RateLimitConfig> = {},
+    private now: () => number = () => Date.now()
+  ) {}
+
+  private configFor(channel: string): RateLimitConfig {
+    return this.overrides[channel] ?? { capacity: this.capacity, refillRate: this.refillRate }
   }
 
   /**
    * Check if request is allowed (consumes 1 token if available).
-   * @param channel - IPC channel name
-   * @returns true if allowed, false if rate limited
+   * Call this only after the request has passed validation, so malformed
+   * requests cannot burn the caller's budget.
    */
   checkLimit(channel: string): boolean {
-    const now = Date.now()
+    const { capacity, refillRate } = this.configFor(channel)
+    const now = this.now()
     let bucket = this.buckets.get(channel)
 
     if (!bucket) {
-      bucket = { tokens: this.capacity, lastRefill: now }
+      bucket = { tokens: capacity, lastRefill: now }
       this.buckets.set(channel, bucket)
     }
 
-    // Refill tokens based on time elapsed
-    const elapsed = (now - bucket.lastRefill) / 1000 // seconds
-    const tokensToAdd = Math.floor(elapsed * this.refillRate)
+    // Fractional refill: always advance lastRefill so sub-token elapsed time is not discarded.
+    // A backwards clock step must not move lastRefill back, or the catch-up would refill twice.
+    const elapsed = Math.max(0, now - bucket.lastRefill) / 1000
+    bucket.tokens = Math.max(0, Math.min(capacity, bucket.tokens + elapsed * refillRate))
+    bucket.lastRefill = Math.max(bucket.lastRefill, now)
 
-    if (tokensToAdd > 0) {
-      bucket.tokens = Math.min(this.capacity, bucket.tokens + tokensToAdd)
-      bucket.lastRefill = now
-    }
-
-    // Check if token available
-    if (bucket.tokens > 0) {
+    if (bucket.tokens >= 1) {
       bucket.tokens--
       return true
     }
 
-    return false // Rate limited
+    return false
   }
 
   /**
@@ -68,11 +69,8 @@ export class IpcRateLimiter {
    * @returns Current token count and capacity
    */
   getStatus(channel: string): { tokens: number; capacity: number } {
-    const bucket = this.buckets.get(channel)
-    return {
-      tokens: bucket?.tokens ?? this.capacity,
-      capacity: this.capacity
-    }
+    const { capacity } = this.configFor(channel)
+    return { tokens: this.buckets.get(channel)?.tokens ?? capacity, capacity }
   }
 
   /**

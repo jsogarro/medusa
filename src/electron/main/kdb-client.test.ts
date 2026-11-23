@@ -1,0 +1,176 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const h = vi.hoisted(() => ({
+  failConnects: 0,
+  conns: [] as any[],
+  hangQueries: false,
+  hangConnects: false,
+  pendingConnects: [] as ((e?: Error, c?: unknown) => void)[]
+}))
+
+vi.mock('node-q', async () => {
+  const { EventEmitter } = await import('events')
+  class FakeConn extends EventEmitter {
+    ksCalls: string[] = []
+    k(..._args: any[]) {
+      const cb = _args[_args.length - 1]
+      if (!h.hangQueries) cb(undefined, 'ok')
+    }
+    ks(expr: string, cb: (e?: Error) => void) {
+      this.ksCalls.push(expr)
+      cb(undefined)
+    }
+    closed = false
+    close(cb: () => void) {
+      this.closed = true
+      cb()
+    }
+  }
+  return {
+    connect: (_p: unknown, cb: (e?: Error, c?: unknown) => void) => {
+      if (h.hangConnects) {
+        h.pendingConnects.push(cb)
+        return
+      }
+      if (h.failConnects > 0) {
+        h.failConnects--
+        cb(new Error('ECONNREFUSED'))
+        return
+      }
+      const c = new FakeConn()
+      h.conns.push(c)
+      cb(undefined, c)
+    }
+  }
+})
+
+import { KdbClient } from './kdb-client'
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  vi.spyOn(console, 'log').mockImplementation(() => {})
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  h.failConnects = 0
+  h.conns = []
+  h.hangQueries = false
+  h.hangConnects = false
+  h.pendingConnects = []
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
+
+describe('KdbClient', () => {
+  it('does not crash on an error event when nobody listens, and surfaces the connect failure', async () => {
+    h.failConnects = 1
+    const client = new KdbClient({ host: 'localhost', port: 1 })
+    await expect(client.connect()).rejects.toThrow('ECONNREFUSED')
+    expect(vi.getTimerCount()).toBe(1) // reconnect was still scheduled
+    await client.disconnect()
+  })
+
+  it('keeps retrying with backoff until the connection succeeds', async () => {
+    h.failConnects = 3
+    const client = new KdbClient({ host: 'localhost', port: 1 })
+    await expect(client.connect()).rejects.toThrow('ECONNREFUSED')
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+
+    expect(h.failConnects).toBe(0)
+    expect(client.isConnected()).toBe(true)
+    await client.disconnect()
+  })
+
+  it('reconnects after a close and re-subscribes to every subscribed table', async () => {
+    const client = new KdbClient({ host: 'localhost', port: 1 })
+    await client.connect()
+    await client.subscribe('order')
+    await client.subscribe('trade')
+    expect(h.conns[0].ksCalls).toHaveLength(2)
+
+    h.conns[0].emit('close')
+    expect(client.isConnected()).toBe(false)
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(client.isConnected()).toBe(true)
+    expect(h.conns).toHaveLength(2)
+    expect(h.conns[1].ksCalls).toEqual(h.conns[0].ksCalls)
+    await client.disconnect()
+  })
+
+  it('does not reconnect after an explicit disconnect', async () => {
+    const client = new KdbClient({ host: 'localhost', port: 1 })
+    await client.connect()
+    await client.disconnect()
+    h.conns[0].emit('close')
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(h.conns).toHaveLength(1)
+  })
+
+  it('a late close from a replaced connection does not clobber the live one', async () => {
+    const client = new KdbClient({ host: 'localhost', port: 1 })
+    await client.connect()
+    h.conns[0].emit('close')
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(client.isConnected()).toBe(true)
+
+    h.conns[0].emit('close')
+    expect(client.isConnected()).toBe(true)
+    await client.disconnect()
+  })
+
+  it('rejects a query that never answers instead of hanging', async () => {
+    const client = new KdbClient({ host: 'localhost', port: 1 }, { queryTimeoutMs: 1000 })
+    await client.connect()
+    h.hangQueries = true
+    const p = client.query('.some.fn', [1])
+    const assertion = expect(p).rejects.toMatchObject({ name: 'KdbTimeoutError', message: expect.stringMatching(/timed out/) })
+    await vi.advanceTimersByTimeAsync(1000)
+    await assertion
+    await client.disconnect()
+  })
+
+  it.each(['order;1', 'a b', '`x', 'Order', '', '1abc', 'a\nb', 'order\n'])(
+    'refuses to splice table name %j into q text',
+    async (table) => {
+      const client = new KdbClient({ host: 'localhost', port: 1 })
+      await client.connect()
+      await expect(client.subscribe(table)).rejects.toThrow(/Invalid table name/)
+      expect(h.conns[0].ksCalls).toHaveLength(0)
+      await client.disconnect()
+    }
+  )
+
+  it('querying while disconnected throws a distinct not-connected error', async () => {
+    const client = new KdbClient({ host: 'localhost', port: 1 })
+    await expect(client.query('.some.fn', [1])).rejects.toMatchObject({ name: 'KdbNotConnectedError' })
+  })
+
+  it('gives up on a connect that never answers, and closes it if it arrives late', async () => {
+    h.hangConnects = true
+    const client = new KdbClient({ host: 'localhost', port: 1 }, { connectTimeoutMs: 2000 })
+    const assertion = expect(client.connect()).rejects.toThrow(/connect timed out/)
+    await vi.advanceTimersByTimeAsync(2000)
+    await assertion
+    expect(client.isConnected()).toBe(false)
+
+    const late = { closed: false, close(cb: () => void) { this.closed = true; cb() }, addListener() {} }
+    h.pendingConnects[0](undefined, late)
+    expect(late.closed).toBe(true)
+    expect(client.isConnected()).toBe(false)
+    await client.disconnect()
+  })
+
+  it('forwards upd events', async () => {
+    const client = new KdbClient({ host: 'localhost', port: 1 })
+    const seen: unknown[] = []
+    client.on('update', (t, d) => seen.push([t, d]))
+    await client.connect()
+    h.conns[0].emit('upd', 'order', [1])
+    expect(seen).toEqual([['order', [1]]])
+    await client.disconnect()
+  })
+})
+

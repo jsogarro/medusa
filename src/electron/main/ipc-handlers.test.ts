@@ -1,0 +1,496 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const h = vi.hoisted(() => ({
+  handlers: new Map<string, (...args: any[]) => any>(),
+  queries: [] as { fn: string; args: any[] | undefined }[],
+  clients: [] as any[],
+  subscribed: [] as string[],
+  connectGate: undefined as Promise<void> | undefined,
+  placeGate: undefined as Promise<void> | undefined,
+  failNextConnect: false,
+  windows: [] as any[],
+  respond: (_fn: string, _args?: any[]): any => undefined
+}))
+
+vi.mock('electron', () => ({
+  ipcMain: {
+    handle: (ch: string, fn: (...a: any[]) => any) => {
+      if (h.handlers.has(ch)) throw new Error(`Attempted to register a second handler for '${ch}'`)
+      h.handlers.set(ch, fn)
+    },
+    removeHandler: (ch: string) => h.handlers.delete(ch)
+  },
+  BrowserWindow: class {
+    static getAllWindows() {
+      return h.windows
+    }
+  },
+  app: { isPackaged: true }
+}))
+
+vi.mock('./kdb-client', async () => {
+  const { EventEmitter } = await import('events')
+  class FakeKdbClient extends EventEmitter {
+    connected = false
+    disconnects = 0
+    constructor(public cfg: unknown) {
+      super()
+      h.clients.push(this)
+    }
+    async connect() {
+      await h.connectGate
+      if (h.failNextConnect) {
+        h.failNextConnect = false
+        throw new Error('ECONNREFUSED')
+      }
+      this.connected = true
+    }
+    async disconnect() {
+      this.connected = false
+      this.disconnects++
+    }
+    isConnected() {
+      return this.connected
+    }
+    async subscribe(table: string) {
+      h.subscribed.push(table)
+    }
+    async query(fn: string, args?: any[]) {
+      h.queries.push({ fn, args })
+      if (fn === '.exchange.coordinator.placeOrder') await h.placeGate
+      return h.respond(fn, args)
+    }
+  }
+  return { KdbClient: FakeKdbClient, SAFE_TABLE: /^[a-z][a-zA-Z0-9_.]*$/ }
+})
+
+import { pathToFileURL } from 'node:url'
+import { checkIpcLimit, heldOrderCount, setupIpcHandlers } from './ipc-handlers'
+import { RENDERER_FILE } from './security'
+
+const TRUSTED = { senderFrame: { url: pathToFileURL(RENDERER_FILE).href } }
+const EVIL = { senderFrame: { url: 'https://evil.example/' } }
+const win = { isDestroyed: () => false, webContents: { send: vi.fn() } } as any
+const cfg = { tp: { host: 'localhost', port: 5010 }, rdb: { host: 'localhost', port: 5011 } }
+
+const call = (ch: string, ...args: any[]) => h.handlers.get(ch)!(TRUSTED, ...args)
+const order = {
+  exchange: 'alpaca',
+  pair: 'BTC/USD',
+  side: 'buy',
+  orderType: 'limit',
+  price: 100.5,
+  quantity: 2,
+  strategy: 'manual'
+}
+const typed = (a: any) => ({ type: a.type(), value: a.value() })
+
+// The limiter lives for the whole process, so give every test a fresh budget by letting the clock run.
+let clock = Date.parse('2030-01-01T00:00:00Z')
+
+beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime((clock += 3_600_000))
+  h.handlers.clear()
+  h.queries.length = 0
+  h.subscribed.length = 0
+  h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : { orderId: 'ORD_1_alpaca', status: 'open' })
+  setupIpcHandlers()
+  expect((await call('kdb:connect', cfg)).success).toBe(true)
+  h.queries.length = 0
+})
+
+describe('kdb:placeOrder', () => {
+  it('rejects an order the risk module rejected and never reaches the coordinator', async () => {
+    h.respond = (fn) => (fn === '.risk.validateOrder' ? [false, 'emergencyStop', {}] : { orderId: 'X' })
+    const r = await call('kdb:placeOrder', order)
+    expect(r.success).toBe(false)
+    expect(r.error).toMatch(/emergencyStop/)
+    expect(h.queries.map((q) => q.fn)).toEqual(['.risk.validateOrder'])
+  })
+
+  it.each([[undefined], [null], [true], [[]], [{}], [[null, '']], [['y', '']]])(
+    'fails closed on unexpected risk verdict %j',
+    async (verdict) => {
+      h.respond = (fn) => (fn === '.risk.validateOrder' ? verdict : { orderId: 'X' })
+      const r = await call('kdb:placeOrder', order)
+      expect(r.success).toBe(false)
+      expect(h.queries.map((q) => q.fn)).toEqual(['.risk.validateOrder'])
+    }
+  )
+
+  it('places through the coordinator with typed symbols and 6-dp fixed-point longs', async () => {
+    const r = await call('kdb:placeOrder', order)
+    expect(r).toEqual({ success: true, data: { orderId: 'ORD_1_alpaca', status: 'open' } })
+    expect(h.queries.map((q) => q.fn)).toEqual(['.risk.validateOrder', '.exchange.coordinator.placeOrder'])
+
+    const [exchange, pair, orderType, side, price, quantity] = h.queries[1].args!.map(typed)
+    expect(exchange).toEqual({ type: 'symbol', value: 'alpaca' })
+    expect(pair).toEqual({ type: 'symbol', value: 'BTC/USD' })
+    expect(orderType).toEqual({ type: 'symbol', value: 'limit' })
+    expect(side).toEqual({ type: 'symbol', value: 'buy' })
+    expect(price.type).toBe('long')
+    expect(price.value.toString()).toBe('100500000')
+    expect(quantity.value.toString()).toBe('2000000')
+  })
+
+  it('sends a null long price for market orders', async () => {
+    await call('kdb:placeOrder', { ...order, orderType: 'market', price: 0 })
+    const price = typed(h.queries[1].args![4])
+    expect(price).toEqual({ type: 'long', value: null })
+  })
+
+  it('fails if the coordinator returns no orderId (never reports a fabricated success)', async () => {
+    h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : null)
+    const r = await call('kdb:placeOrder', order)
+    expect(r.success).toBe(false)
+  })
+
+  it('invalid orders do not consume rate-limit tokens', async () => {
+    for (let i = 0; i < 50; i++) {
+      expect((await call('kdb:placeOrder', { ...order, quantity: -1 })).success).toBe(false)
+    }
+    expect((await call('kdb:placeOrder', order)).success).toBe(true)
+  })
+
+  it('rate limits a burst of valid orders', async () => {
+    const results = []
+    for (let i = 0; i < 40; i++) results.push((await call('kdb:placeOrder', order)).success)
+    expect(results.filter(Boolean).length).toBeLessThan(40)
+    expect(results.filter(Boolean).length).toBeGreaterThan(0)
+  })
+
+  it('rejects calls from an untrusted sender', async () => {
+    const r = await h.handlers.get('kdb:placeOrder')!(EVIL, { ...order, pair: 'BTC_USD' })
+    expect(r.success).toBe(false)
+    expect(h.queries).toHaveLength(0)
+  })
+})
+
+const timeout = () => Object.assign(new Error('kdb+ query timed out after 10000ms'), { name: 'KdbTimeoutError' })
+const placeCalls = () => h.queries.filter((q) => q.fn === '.exchange.coordinator.placeOrder').length
+
+describe('kdb:placeOrder after a timeout', () => {
+  it('reports an unknown outcome, not a plain failure, when the coordinator call times out', async () => {
+    h.respond = (fn) => {
+      if (fn === '.risk.validateOrder') return [true, null]
+      throw timeout()
+    }
+    const r = await call('kdb:placeOrder', order)
+    expect(r.success).toBe(false)
+    expect(r.outcomeUnknown).toBe(true)
+    expect(r.error).toMatch(/outcome unknown.*open orders/i)
+  })
+
+  it('a timed-out risk check is a plain failure: nothing was sent to the exchange', async () => {
+    h.respond = () => {
+      throw timeout()
+    }
+    const r = await call('kdb:placeOrder', order)
+    expect(r.success).toBe(false)
+    expect(r.outcomeUnknown).toBeUndefined()
+  })
+
+  it('refuses an identical resubmit for a while, but not a different order or a later retry', async () => {
+    let fail = true
+    h.respond = (fn) => {
+      if (fn === '.risk.validateOrder') return [true, null]
+      if (fail) throw timeout()
+      return { orderId: 'ORD_2', status: 'open' }
+    }
+    expect((await call('kdb:placeOrder', order)).outcomeUnknown).toBe(true)
+    fail = false
+    expect(placeCalls()).toBe(1)
+
+    const again = await call('kdb:placeOrder', order)
+    expect(again.success).toBe(false)
+    expect(again.error).toMatch(/outcome unknown/i)
+    expect(placeCalls()).toBe(1)
+
+    expect((await call('kdb:placeOrder', { ...order, quantity: 3 })).success).toBe(true)
+
+    vi.setSystemTime(Date.now() + 10 * 60_000)
+    expect((await call('kdb:placeOrder', order)).success).toBe(true)
+  })
+})
+
+describe('kdb:placeOrder outcome once the request has been issued', () => {
+  const place = (reply: () => unknown) => {
+    h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : reply())
+  }
+
+  it.each([
+    ['a reply with no orderId', () => ({ status: 'open' })],
+    ['a null reply', () => null],
+    ['a socket error mid-call', () => {
+      throw new Error('read ECONNRESET')
+    }]
+  ])('treats %s as an unknown outcome and holds an identical resubmit', async (_name, reply) => {
+    place(reply)
+    const r = await call('kdb:placeOrder', order)
+    expect(r).toMatchObject({ success: false, outcomeUnknown: true })
+    place(() => ({ orderId: 'ORD_9' }))
+    const again = await call('kdb:placeOrder', order)
+    expect(again.success).toBe(false)
+    expect(again.outcomeUnknown).toBeUndefined()
+    expect(again.error).toMatch(/outcome unknown/i)
+    expect(placeCalls()).toBe(1)
+  })
+
+  it('keeps a failure that happened before the request was sent a plain failure', async () => {
+    place(() => {
+      throw Object.assign(new Error('Not connected to kdb+'), { name: 'KdbNotConnectedError' })
+    })
+    const r = await call('kdb:placeOrder', order)
+    expect(r.success).toBe(false)
+    expect(r.outcomeUnknown).toBeUndefined()
+    place(() => ({ orderId: 'ORD_9' }))
+    expect((await call('kdb:placeOrder', order)).success).toBe(true)
+  })
+})
+
+describe('unknown-outcome hold bookkeeping', () => {
+  it('drops expired holds so the map cannot grow without bound', async () => {
+    h.respond = (fn) => {
+      if (fn === '.risk.validateOrder') return [true, null]
+      throw timeout()
+    }
+    for (let i = 0; i < 5; i++) await call('kdb:placeOrder', { ...order, quantity: i + 1 })
+    expect(heldOrderCount()).toBeGreaterThanOrEqual(5)
+
+    vi.setSystemTime(Date.now() + 10 * 60_000)
+    h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : { orderId: 'ORD_5' })
+    await call('kdb:placeOrder', { ...order, quantity: 99 })
+    expect(heldOrderCount()).toBe(0)
+  })
+})
+
+describe('kdb:placeOrder in-flight dedupe', () => {
+  it('treats two limit orders that differ only in price as different orders', async () => {
+    let release!: () => void
+    h.placeGate = new Promise<void>((r) => (release = r))
+    const a = call('kdb:placeOrder', order)
+    const b = call('kdb:placeOrder', { ...order, price: order.price + 1 })
+    await new Promise((r) => setTimeout(r, 0))
+    release()
+    h.placeGate = undefined
+    expect([(await a).success, (await b).success]).toEqual([true, true])
+    expect(placeCalls()).toBe(2)
+  })
+
+  it('rejects an identical order while the first is still in flight', async () => {
+    let release!: () => void
+    h.placeGate = new Promise<void>((r) => (release = r))
+    const first = call('kdb:placeOrder', order)
+    await new Promise((r) => setTimeout(r, 0))
+    const second = await call('kdb:placeOrder', { ...order })
+    expect(second.success).toBe(false)
+    expect(second.error).toMatch(/identical order/i)
+    release()
+    h.placeGate = undefined
+    expect((await first).success).toBe(true)
+    expect(placeCalls()).toBe(1)
+  })
+
+  it('lets a different order through concurrently, and the same order again once it finished', async () => {
+    let release!: () => void
+    h.placeGate = new Promise<void>((r) => (release = r))
+    const first = call('kdb:placeOrder', order)
+    const other = call('kdb:placeOrder', { ...order, side: 'sell' })
+    await new Promise((r) => setTimeout(r, 0))
+    release()
+    h.placeGate = undefined
+    expect([(await first).success, (await other).success]).toEqual([true, true])
+    expect((await call('kdb:placeOrder', order)).success).toBe(true)
+  })
+
+  it('releases the slot when the order fails', async () => {
+    h.respond = () => {
+      throw new Error('boom')
+    }
+    expect((await call('kdb:placeOrder', order)).success).toBe(false)
+    h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : { orderId: 'ORD_3' })
+    expect((await call('kdb:placeOrder', order)).success).toBe(true)
+  })
+})
+
+describe('kdb:cancelOrder', () => {
+  it('routes to the coordinator cancel with the exchange', async () => {
+    h.respond = () => ({ status: 'cancelled' })
+    const r = await call('kdb:cancelOrder', 'ORD_1_alpaca', 'alpaca')
+    expect(r.success).toBe(true)
+    expect(h.queries[0].fn).toBe('.exchange.coordinator.cancelOrder')
+    expect(h.queries[0].args!.map(typed)).toEqual([
+      { type: 'symbol', value: 'alpaca' },
+      { type: 'symbol', value: 'ORD_1_alpaca' }
+    ])
+  })
+
+  it('rejects an invalid order id or exchange', async () => {
+    expect((await call('kdb:cancelOrder', 'a;b', 'alpaca')).success).toBe(false)
+    expect((await call('kdb:cancelOrder', 'ORD_1', 'a b')).success).toBe(false)
+    expect(h.queries).toHaveLength(0)
+  })
+})
+
+describe('kdb:subscribe', () => {
+  it('subscribes to a valid table', async () => {
+    expect((await call('kdb:subscribe', 'order')).success).toBe(true)
+    expect(h.subscribed).toEqual(['order'])
+  })
+
+  it.each(['order;1', 'a b', '`x', 'Order', '', 42, null])('rejects table %j before reaching the client', async (table) => {
+    expect((await call('kdb:subscribe', table)).success).toBe(false)
+    expect(h.subscribed).toEqual([])
+  })
+})
+
+describe('rate limits on state-changing channels', () => {
+  it('limits a burst of cancels', async () => {
+    h.respond = () => ({ status: 'cancelled' })
+    const ok: boolean[] = []
+    for (let i = 0; i < 40; i++) ok.push((await call('kdb:cancelOrder', 'ORD_1', 'alpaca')).success)
+    expect(ok.filter(Boolean).length).toBeGreaterThan(0)
+    expect(ok.filter(Boolean).length).toBeLessThan(40)
+  })
+
+  it('limits a burst of strategy controls', async () => {
+    const ok: boolean[] = []
+    for (let i = 0; i < 40; i++) ok.push((await call('kdb:strategyControl', 'simpleMM', 'pause')).success)
+    expect(ok.filter(Boolean).length).toBeGreaterThan(0)
+    expect(ok.filter(Boolean).length).toBeLessThan(40)
+  })
+})
+
+describe('kdb:strategyControl', () => {
+  it('sends the strategy name as a q symbol', async () => {
+    await call('kdb:strategyControl', 'simpleMM', 'pause')
+    expect(h.queries[0].fn).toBe('.engine.strategy.pause')
+    expect(h.queries[0].args!.map(typed)).toEqual([{ type: 'symbol', value: 'simpleMM' }])
+  })
+})
+
+describe('handlers for q functions that do not exist', () => {
+  it.each([
+    ['kdb:getCandles', ['alpaca', 'BTC_USD', '1m']],
+    ['kdb:getRiskMetrics', []]
+  ])('%s reports not implemented without calling q', async (ch, args) => {
+    const r = await call(ch, ...args)
+    expect(r).toEqual({ success: false, error: 'not implemented' })
+    expect(h.queries).toHaveLength(0)
+  })
+})
+
+describe('kdb:connect', () => {
+  it('rejects hosts outside the allowlist without creating clients', async () => {
+    const before = h.clients.length
+    const r = await call('kdb:connect', { ...cfg, tp: { host: 'evil.example.com', port: 5010 } })
+    expect(r.success).toBe(false)
+    expect(h.clients.length).toBe(before)
+  })
+
+  it('is idempotent for an unchanged config so a second window does not tear down the link', async () => {
+    const before = h.clients.length
+    const first = h.clients[h.clients.length - 2]
+    const r = await call('kdb:connect', cfg)
+    expect(r.success).toBe(true)
+    expect(h.clients.length).toBe(before)
+    expect(first.disconnects).toBe(0)
+    expect(first.isConnected()).toBe(true)
+  })
+
+  it('serialises concurrent connects so no client is orphaned', async () => {
+    await call('kdb:connect', { ...cfg, rdb: { host: 'localhost', port: 6100 } }) // force a fresh connect below
+    const before = h.clients.length
+    let release!: () => void
+    h.connectGate = new Promise<void>((r) => (release = r))
+    const next = { ...cfg, rdb: { host: 'localhost', port: 6200 } }
+    const calls = [call('kdb:connect', next), call('kdb:connect', next)]
+    await new Promise((r) => setTimeout(r, 0))
+    release()
+    h.connectGate = undefined
+    expect((await Promise.all(calls)).map((r) => r.success)).toEqual([true, true])
+
+    const created = h.clients.slice(before)
+    expect(created).toHaveLength(2) // one tp + one rdb, shared by both calls
+    expect(created.every((c) => c.connected && c.disconnects === 0)).toBe(true)
+  })
+
+  it('a failed connect does not poison the queue for the next one', async () => {
+    const next = { ...cfg, rdb: { host: 'localhost', port: 6300 } }
+    h.failNextConnect = true
+    expect((await call('kdb:connect', next)).success).toBe(false)
+    expect((await call('kdb:connect', next)).success).toBe(true)
+  })
+
+  it('reconnects when the config changes', async () => {
+    const before = h.clients.length
+    await call('kdb:connect', { ...cfg, rdb: { host: 'localhost', port: 6000 } })
+    expect(h.clients.length).toBe(before + 2)
+  })
+})
+
+describe('rate limiter lifetime', () => {
+  it('keeps budgets when handlers are registered again', async () => {
+    const burst = async () => {
+      let n = 0
+      for (let i = 0; i < 40; i++) if ((await call('kdb:placeOrder', order)).success) n++
+      return n
+    }
+    expect(await burst()).toBeLessThan(40)
+    setupIpcHandlers()
+    expect(await burst()).toBe(0)
+  })
+
+  it('limits subscriptions and pop-out windows', async () => {
+    const subs: boolean[] = []
+    for (let i = 0; i < 200; i++) subs.push((await call('kdb:subscribe', 'order')).success)
+    expect(subs.filter(Boolean).length).toBeLessThan(200)
+
+    const popouts: boolean[] = []
+    for (let i = 0; i < 50; i++) {
+      try {
+        checkIpcLimit('window:popout')
+        popouts.push(true)
+      } catch {
+        popouts.push(false)
+      }
+    }
+    expect(popouts.filter(Boolean).length).toBeGreaterThan(0)
+    expect(popouts.filter(Boolean).length).toBeLessThan(50)
+  })
+})
+
+describe('setupIpcHandlers', () => {
+  it('can be called again (macOS activate) without throwing', () => {
+    expect(() => setupIpcHandlers()).not.toThrow()
+    expect(h.handlers.has('kdb:placeOrder')).toBe(true)
+  })
+})
+
+describe('kdb updates', () => {
+  it('skip destroyed windows instead of throwing in the main process', () => {
+    const dead = {
+      isDestroyed: () => true,
+      webContents: {
+        send: vi.fn(() => {
+          throw new Error('Object has been destroyed')
+        })
+      }
+    }
+    h.windows = [dead, win]
+    win.webContents.send.mockClear()
+    expect(() => h.clients[h.clients.length - 2].emit('update', 'order', { orderId: 'x' })).not.toThrow()
+    expect(dead.webContents.send).not.toHaveBeenCalled()
+    expect(win.webContents.send).toHaveBeenCalledTimes(1)
+  })
+
+  it('are delivered to every open window, not just the one that connected', () => {
+    const popout = { isDestroyed: () => false, webContents: { send: vi.fn() } }
+    h.windows = [win, popout]
+    win.webContents.send.mockClear()
+    h.clients[h.clients.length - 2].emit('update', 'order', { orderId: 'x' })
+    expect(win.webContents.send).toHaveBeenCalledWith('kdb:update', { table: 'order', data: { orderId: 'x' } })
+    expect(popout.webContents.send).toHaveBeenCalledWith('kdb:update', { table: 'order', data: { orderId: 'x' } })
+  })
+})

@@ -1,10 +1,11 @@
-import { useState, useEffect, memo } from 'react'
+import { useState, useEffect, useRef, memo } from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card'
 import { Input } from '../ui/input'
 import { Button } from '../ui/button'
 import { LinkColor, useSymbolLinkStore } from '../../stores/symbolLink'
 import { AlgoSelector, AlgoParams } from '../trading/AlgoSelector'
 import { AssetClassSwitcher } from './AssetClassSwitcher'
+import { createSubmitGuard, submitOrder } from '../../lib/kdb-actions'
 import {
   ASSET_CLASS_CONFIG,
   inferTradingAssetClass,
@@ -52,12 +53,20 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
   const [quantity, setQuantity] = useState('')
   const [strategy, setStrategy] = useState('manual')
   const [algoParams, setAlgoParams] = useState<AlgoParams>({ type: 'direct' })
+  const [submitting, setSubmitting] = useState(false)
+  // Set when an order timed out with an unknown outcome; cleared once the user changes the order.
+  const [held, setHeld] = useState(false)
+  const submitGuard = useRef(createSubmitGuard()).current
 
   useEffect(() => {
     if (!assetConfig.supportedOrderTypes.includes(orderType)) {
       setOrderType(assetConfig.supportedOrderTypes[0])
     }
   }, [assetConfig.supportedOrderTypes, orderType])
+
+  useEffect(() => {
+    setHeld(false)
+  }, [exchange, pair, side, orderType, price, quantity, strategy])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -72,14 +81,30 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
       strategy
     }
 
-    const result = await window.kdb.placeOrder(order)
-    if (result.success) {
-      alert(`Order submitted: ${result.data.orderId}`)
-      setPrice('')
-      setQuantity('')
-    } else {
-      alert(`Order failed: ${result.error}`)
+    if (!Number.isFinite(order.quantity) || (orderType === 'limit' && !Number.isFinite(order.price))) {
+      alert('Enter a valid price and quantity')
+      return
     }
+    const summary = `${side.toUpperCase()} ${order.quantity} ${pair} on ${exchange} (${
+      orderType === 'market' ? 'market' : `limit @ ${order.price}`
+    })`
+    if (!confirm(`Submit order?\n${summary}`)) return
+
+    // One submission at a time: a second click or Enter while one is in flight is dropped.
+    await submitGuard(async () => {
+      setSubmitting(true)
+      try {
+        const outcome = await submitOrder(window.kdb, order, algoParams.type)
+        alert(outcome.message)
+        if (outcome.ok) {
+          setPrice('')
+          setQuantity('')
+        }
+        setHeld(outcome.hold)
+      } finally {
+        setSubmitting(false)
+      }
+    })
   }
 
   return (
@@ -195,6 +220,7 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
           <Button
             type="submit"
             className="w-full"
+            disabled={submitting || held}
             variant={algoParams.type === 'direct' ? (side === 'buy' ? 'buy' : 'sell') : 'default'}
             style={
               algoParams.type !== 'direct'
@@ -202,7 +228,7 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
                 : undefined
             }
           >
-            {algoParams.type === 'direct' ? 'Submit Order' : 'Start Algo'}
+            {held ? 'Outcome unknown — check open orders' : algoParams.type === 'direct' ? 'Submit Order' : 'Start Algo'}
           </Button>
         </form>
       </CardContent>

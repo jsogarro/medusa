@@ -1,8 +1,18 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, session } from 'electron'
 import { join } from 'path'
-import { setupIpcHandlers } from './ipc-handlers'
+import { checkIpcLimit, setupIpcHandlers } from './ipc-handlers'
+import { isValidSymbolLink } from './validation'
+import { DEV_SERVER_URL, isDevMode, isTrustedSender, isTrustedUrl, RENDERER_FILE } from './security'
 
 let mainWindow: BrowserWindow | null = null
+
+// The renderer only ever shows our own pages: no new windows, no navigation away.
+function hardenWindow(win: BrowserWindow): void {
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!isTrustedUrl(url)) event.preventDefault()
+  })
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -13,19 +23,21 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   })
 
-  // Setup IPC handlers
-  setupIpcHandlers(mainWindow)
+  hardenWindow(mainWindow)
+
+  // Setup IPC handlers (safe to call again when the window is recreated)
+  setupIpcHandlers()
 
   // Load URL based on environment
-  if (process.env.NODE_ENV === 'development') {
-    mainWindow.loadURL('http://localhost:5173')
+  if (isDevMode()) {
+    mainWindow.loadURL(DEV_SERVER_URL)
     mainWindow.webContents.openDevTools()
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(RENDERER_FILE)
   }
 
   mainWindow.on('closed', () => {
@@ -34,7 +46,12 @@ function createWindow(): void {
 }
 
 // Pop-out window handler
-ipcMain.handle('window:popout', (_event, widgetId: string, config: any) => {
+ipcMain.handle('window:popout', (event, widgetId: string, config: any) => {
+  if (!isTrustedSender(event as never) || typeof widgetId !== 'string') {
+    return Promise.reject(new Error('Untrusted sender'))
+  }
+  checkIpcLimit('window:popout')
+  config = config ?? {}
   // Restore window bounds from config or use defaults
   const bounds = config.bounds || { x: undefined, y: undefined, width: 800, height: 600 }
 
@@ -49,9 +66,11 @@ ipcMain.handle('window:popout', (_event, widgetId: string, config: any) => {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   })
+
+  hardenWindow(popout)
 
   // Save window bounds on move/resize
   const saveWindowBounds = () => {
@@ -77,11 +96,11 @@ ipcMain.handle('window:popout', (_event, widgetId: string, config: any) => {
     linked: config.linkGroup || 'none'
   })
 
-  if (process.env.NODE_ENV === 'development') {
-    popout.loadURL(`http://localhost:5173?${params.toString()}`)
+  if (isDevMode()) {
+    popout.loadURL(`${DEV_SERVER_URL}?${params.toString()}`)
     popout.webContents.openDevTools()
   } else {
-    popout.loadFile(join(__dirname, '../renderer/index.html'), {
+    popout.loadFile(RENDERER_FILE, {
       query: Object.fromEntries(params.entries())
     })
   }
@@ -90,15 +109,24 @@ ipcMain.handle('window:popout', (_event, widgetId: string, config: any) => {
 })
 
 // Symbol link cross-window IPC
-ipcMain.on('symbolLink:changed', (_event, color: string, symbol: string, exchange: string) => {
+ipcMain.on('symbolLink:changed', (event, color: string, symbol: string, exchange: string) => {
+  if (!isTrustedSender(event as never) || !isValidSymbolLink(color, symbol, exchange)) return
   // Broadcast to ALL BrowserWindows
   BrowserWindow.getAllWindows().forEach((win) => {
+    if (win.isDestroyed()) return
     win.webContents.send('symbolLink:update', color, symbol, exchange)
   })
 })
 
+// <webview> tags would let a page embed arbitrary content; the app never uses them.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-attach-webview', (event) => event.preventDefault())
+})
+
 // App lifecycle
 app.whenReady().then(() => {
+  // The app needs no camera, microphone, geolocation, notification or similar grants.
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
   createWindow()
 
   app.on('activate', () => {

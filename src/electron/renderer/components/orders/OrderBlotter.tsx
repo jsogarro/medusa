@@ -11,7 +11,9 @@ export function OrderBlotter() {
   const [filter, setFilter] = useState('')
 
   const handleCancelOrder = async (orderId: string) => {
-    const result = await window.kdb.cancelOrder(orderId)
+    const order = orders.find((o) => o.orderId === orderId)
+    if (!order) return
+    const result = await window.kdb.cancelOrder(orderId, order.exchange)
     if (!result.success) {
       alert(`Failed to cancel order: ${result.error}`)
     }
