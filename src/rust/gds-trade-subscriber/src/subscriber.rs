@@ -190,9 +190,8 @@ impl TradeSubscriber {
                         continue;
                     }
 
-                    // Record and publish
-                    self.deduplicator.record(&normalized_trade.trade_id);
-
+                    // Publish, and only then record: a trade that was not published
+                    // must stay eligible for redelivery or backfill.
                     let trade = normalized_trade.into_trade();
                     if let Err(e) = self.publisher.publish_trade(&trade).await {
                         error!(
@@ -202,6 +201,7 @@ impl TradeSubscriber {
                             e
                         );
                     } else {
+                        self.deduplicator.record(&trade.id);
                         debug!(
                             "[{}] Published trade: {} @ {} x {}",
                             self.exchange_name(),
@@ -249,15 +249,14 @@ impl TradeSubscriber {
                             continue;
                         }
 
-                        self.deduplicator.record(&normalized_trade.trade_id);
-
                         let trade = normalized_trade.into_trade();
-                        if let Err(e) = self.publisher.publish_trade(&trade).await {
-                            warn!(
+                        match self.publisher.publish_trade(&trade).await {
+                            Ok(()) => self.deduplicator.record(&trade.id),
+                            Err(e) => warn!(
                                 "[{}] Failed to publish backfilled trade: {}",
                                 self.exchange_name(),
                                 e
-                            );
+                            ),
                         }
                     }
                 }
@@ -269,5 +268,59 @@ impl TradeSubscriber {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BITSTAMP_TRADE: &str = r#"{"event":"trade","channel":"live_trades_btcusd","data":{"id":123456,"amount":0.5,"price":50000.0,"type":0,"timestamp":"1640000000"}}"#;
+
+    fn subscriber(tp_port: u16) -> TradeSubscriber {
+        let config = ExchangeConfig {
+            name: "bitstamp".to_string(),
+            ws_url: "ws://127.0.0.1:1".to_string(),
+            rest_url: "http://127.0.0.1:1".to_string(),
+            symbols: vec![],
+            enabled: true,
+        };
+        let publisher = KdbPublisher::lazy("127.0.0.1", tp_port, "", "");
+        TradeSubscriber::new(config, publisher, Duration::from_secs(30), false).unwrap()
+    }
+
+    #[tokio::test]
+    async fn failed_publish_does_not_mark_trade_as_seen() {
+        // Nothing listens on port 1: the publish fails.
+        let mut sub = subscriber(1);
+        sub.process_message(BITSTAMP_TRADE).await;
+        assert!(
+            !sub.deduplicator.is_duplicate("123456"),
+            "a trade that was not published must stay eligible for redelivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_publish_marks_trade_as_seen() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tp = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+            }
+            sock.write_all(&[3]).await.unwrap();
+            let mut header = [0u8; 8];
+            sock.read_exact(&mut header).await.unwrap();
+        });
+        let mut sub = subscriber(port);
+        sub.process_message(BITSTAMP_TRADE).await;
+        tp.await.unwrap();
+        assert!(sub.deduplicator.is_duplicate("123456"));
     }
 }
