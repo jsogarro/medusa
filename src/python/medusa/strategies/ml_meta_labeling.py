@@ -160,7 +160,7 @@ class MLMetaLabelingStrategy(BaseStrategy):
             meta_filter = pd.Series(True, index=features.index)
 
         # Long-only: a short primary signal must never open a long position.
-        # Short entries are exposed separately via generate_short_entries().
+        # Short signals come from generate_short_signals().
         entries = (primary_series == 1) & meta_filter
 
         # Exits: primary no longer says long, or meta confidence drops
@@ -174,16 +174,29 @@ class MLMetaLabelingStrategy(BaseStrategy):
 
         return entries, exits
 
-    def generate_short_entries(self, data: pd.DataFrame) -> pd.Series:
-        """Short entry signals (primary == -1 and meta-confident), for ``short_entries``."""
+    def generate_short_signals(self, data: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        """Short entry/exit signals, for the engine's ``short_entries``/``short_exits``.
+
+        Mirror of the long side: enter on primary == -1 (and meta-confident); exit when the
+        primary no longer says short, or meta confidence drops.
+        """
         features = self._extract_features(data)
         primary_series = pd.Series(self.primary_model.predict(features), index=features.index)
-        short = primary_series == -1
+        entries = primary_series == -1
+        exits = primary_series != -1
         if self.meta_model is not None:
             proba = self.meta_model.predict_proba(features)
-            conf = proba[:, 1] if proba.ndim > 1 else proba
-            short = short & (pd.Series(conf, index=features.index) >= self.meta_threshold)
-        return short.reindex(data.index, fill_value=False)
+            conf = pd.Series(proba[:, 1] if proba.ndim > 1 else proba, index=features.index)
+            entries = entries & (conf >= self.meta_threshold)
+            exits = exits | (conf < (self.meta_threshold * 0.8))
+        return (
+            entries.reindex(data.index, fill_value=False),
+            exits.reindex(data.index, fill_value=False),
+        )
+
+    def generate_short_entries(self, data: pd.DataFrame) -> pd.Series:
+        """Short entry signals (primary == -1 and meta-confident)."""
+        return self.generate_short_signals(data)[0]
 
     def generate_signal(
         self,

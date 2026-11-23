@@ -267,3 +267,96 @@ def test_pairs_short_signals_do_not_depend_on_later_bars():
     assert a[0].iloc[:k].any() or a[1].iloc[:k].any()  # not vacuous
 
 
+# --- meta-labeling: short wiring, exits, confidence filter, barriers ------------------------
+
+
+class _ReturnSignModel:
+    """Primary model that follows the sign of the latest 1-bar return (causal)."""
+
+    def predict(self, features):
+        return np.sign(features["return_1d"].to_numpy())
+
+
+class _ConstProba:
+    def __init__(self, p: float) -> None:
+        self.p = p
+
+    def predict_proba(self, features):
+        p = np.full(len(features), self.p)
+        return np.column_stack([1 - p, p])
+
+
+def test_short_primary_signal_opens_a_short_position():
+    from medusa.backtest.vectorbt_engine import VectorBTEngine
+
+    data = _ohlcv()
+    strat = MLMetaLabelingStrategy(primary_model=_ConstModel(-1))
+    pf = VectorBTEngine(asset_class="crypto").run_strategy(data["close"], strat, data)
+    assert set(pf.trades.records_readable["Direction"]) == {"Short"}
+
+
+def test_long_primary_signal_opens_a_long_position():
+    from medusa.backtest.vectorbt_engine import VectorBTEngine
+
+    data = _ohlcv()
+    strat = MLMetaLabelingStrategy(primary_model=_ConstModel(1))
+    pf = VectorBTEngine(asset_class="crypto").run_strategy(data["close"], strat, data)
+    assert set(pf.trades.records_readable["Direction"]) == {"Long"}
+
+
+def test_meta_short_signals_follow_primary_and_exit_when_it_stops_saying_short():
+    data = _ohlcv()
+    strat = MLMetaLabelingStrategy(primary_model=_ReturnSignModel())
+    short_entries, short_exits = strat.generate_short_signals(data)
+    ret = data["close"].pct_change().iloc[25:]  # skip the feature warm-up
+    short_entries, short_exits = short_entries.iloc[25:], short_exits.iloc[25:]
+    assert short_entries[ret < 0].all() and not short_entries[ret >= 0].any()
+    assert short_exits[ret > 0].all() and not short_exits[ret < 0].any()
+
+
+def test_meta_long_exits_when_primary_turns_short_not_only_flat():
+    data = _ohlcv()
+    _, exits = MLMetaLabelingStrategy(primary_model=_ReturnSignModel()).generate_signals(data)
+    ret = data["close"].pct_change().iloc[25:]  # skip the feature warm-up
+    exits = exits.iloc[25:]
+    assert exits[ret < 0].all()  # primary == -1 must close a long
+    assert not exits[ret > 0].any()
+
+
+def test_meta_confidence_filter_applies_to_short_entries():
+    data = _ohlcv()
+    low = MLMetaLabelingStrategy(primary_model=_ConstModel(-1), meta_model=_ConstProba(0.1))
+    high = MLMetaLabelingStrategy(primary_model=_ConstModel(-1), meta_model=_ConstProba(0.9))
+    assert not low.generate_short_entries(data).any()
+    assert high.generate_short_entries(data).any()
+
+
+def test_meta_short_signals_do_not_depend_on_later_bars():
+    data = _ohlcv(200)
+    k = 150
+    perturbed = data.copy()
+    perturbed.iloc[k:, perturbed.columns.get_loc("close")] *= 1.5
+    strat = MLMetaLabelingStrategy(primary_model=_ReturnSignModel())
+    a = strat.generate_short_signals(data)
+    b = strat.generate_short_signals(perturbed)
+    for s1, s2 in zip(a, b):
+        pd.testing.assert_series_equal(s1.iloc[:k], s2.iloc[:k])
+    assert a[0].iloc[:k].any()
+
+
+def test_triple_barrier_simultaneous_barriers_resolve_to_stop():
+    prices = pd.Series([100.0] * 6)  # return is exactly 0: both zero-width barriers are hit at once
+    strat = MLMetaLabelingStrategy(
+        primary_model=_ConstModel(1), take_profit_pct=0.0, stop_loss_pct=0.0, max_holding_bars=3
+    )
+    labels = strat._create_triple_barrier_labels(prices, pd.Series(1, index=prices.index))
+    assert labels.iloc[0] == -1
+
+
+def test_triple_barrier_time_out_is_labelled_by_sign_of_final_return():
+    strat = MLMetaLabelingStrategy(primary_model=_ConstModel(1), max_holding_bars=3)
+    side = pd.Series(1, index=range(6))
+    up = pd.Series([100.0, 100.2, 100.4, 100.6, 100.6, 100.6])  # +0.6%: inside both barriers
+    down = pd.Series([100.0, 99.8, 99.6, 99.4, 99.4, 99.4])  # -0.6%
+    assert strat._create_triple_barrier_labels(up, side).iloc[0] == 1
+    assert strat._create_triple_barrier_labels(down, side).iloc[0] == -1
