@@ -356,7 +356,10 @@ mod tests {
     #[tokio::test]
     async fn test_bucket_zero_capacity() {
         let mut bucket = Bucket::new(0, 1.0);
-        assert!(!bucket.try_acquire(1), "Cannot acquire from zero-capacity bucket");
+        assert!(
+            !bucket.try_acquire(1),
+            "Cannot acquire from zero-capacity bucket"
+        );
         assert_eq!(bucket.tokens, 0.0);
     }
 
@@ -443,7 +446,11 @@ mod tests {
     async fn test_wait_time_for_zero_tokens() {
         let bucket = Bucket::new(10, 5.0);
         let wait = bucket.wait_time_for(0);
-        assert_eq!(wait, Duration::ZERO, "Wait time for 0 tokens should be zero");
+        assert_eq!(
+            wait,
+            Duration::ZERO,
+            "Wait time for 0 tokens should be zero"
+        );
     }
 
     #[tokio::test]
@@ -464,13 +471,16 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limiter_acquire_after_drain() {
         let limiter = RateLimiter::new(100, None); // Fast refill (100/s), burst = 200
-        // Drain burst capacity
+                                                   // Drain burst capacity
         limiter.acquire(None, 200).await;
         // Acquire 5 more — should wait briefly for refill then succeed
         let start = TokioInstant::now();
         limiter.acquire(None, 5).await;
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(10), "Should wait for refill");
+        assert!(
+            elapsed >= Duration::from_millis(10),
+            "Should wait for refill"
+        );
         assert!(elapsed < Duration::from_secs(5), "Should not wait too long");
     }
 }

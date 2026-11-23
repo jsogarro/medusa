@@ -1,18 +1,15 @@
 / ============================================================================
 / fiat_balance.q - Fiat Balance Audit
 / ============================================================================
-/
-/ Verifies that fiat currency balances (USD, EUR, etc.) on the exchange
+/ // Verifies that fiat currency balances (USD, EUR, etc.) on the exchange
 / match the calculated balance from the ledger. Uses currency-specific
 / precision for rounding (2 decimals for USD/EUR, 0 for JPY).
-/
-/ Dependencies:
+/ // Dependencies:
 /   - audit.q (core infrastructure)
 /   - lib/money.q (.money.precision, .money.round)
 /   - exchange/coordinator.q (.exchange.coordinator.getBalances)
 /   - schema/transaction.q (transaction history)
-/
-/ Usage:
+/ // Usage:
 /   .audit.FIAT_BALANCE.validate[]
 /   .audit.run[`FIAT_BALANCE_AUDIT]
 / ============================================================================

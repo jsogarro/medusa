@@ -1,59 +1,57 @@
 / ============================================================================
 / stub.q - Stubbed Exchange Implementation
 / ============================================================================
-/
-/ Provides:
+/ // Provides:
 /   - Complete in-memory simulated exchange for testing
 /   - Synthetic orderbook generation with configurable parameters
 /   - Order matching engine with realistic fill simulation
-/   - Balance tracking with holds for open orders
+/   - Balance tracking with stub.holds for open stub.orders
 /   - Configurable latency and slippage models
-/
-/ Dependencies:
+/ // Dependencies:
 /   - types.q (validation, constants, ID generator)
 /   - base.q (order states and validation)
 /   - registry.q (registration)
-/
-/ State Tables:
-/   - .exchange.stub.balances: Currency balances
-/   - .exchange.stub.holds: Reserved balances for open orders
-/   - .exchange.stub.orders: In-memory order book
-/   - .exchange.stub.fills: Trade fills
-/
-/ Functions:
-/   - init: Initialize stub with configuration
-/   - placeOrder: Submit and match order
-/   - cancelOrder: Cancel open order
-/   - getBalance: Get currency balance
-/   - getOrderbook: Get synthetic orderbook
-/   - getOpenOrders: Get open orders
-/   - getPosition: Get position (stub)
+/ // State Tables:
+/   - .exchange.stub.stub.balances: Currency stub.balances
+/   - .exchange.stub.stub.holds: Reserved stub.balances for open stub.orders
+/   - .exchange.stub.stub.orders: In-memory order book
+/   - .exchange.stub.stub.fills: Trade stub.fills
+/ // Functions:
+/   - stub.init: Initialize stub with configuration
+/   - stub.placeOrder: Submit and match order
+/   - stub.cancelOrder: Cancel open order
+/   - stub.getBalance: Get currency balance
+/   - stub.getOrderbook: Get synthetic orderbook
+/   - stub.getOpenOrders: Get open stub.orders
+/   - stub.getPosition: Get position (stub)
 / ============================================================================
 
-\d .exchange.stub
+\d .exchange
 
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
 
 / Stub exchange configuration
-config:`symbol`tickSize`minQty`maxQty`feeRate`latencyMs!(`;0.01;0.001;1000.0;0.001;10);
+stub.defaultConfig:`symbol`tickSize`minQty`maxQty`feeRate`latencyMs!(`;0.01;0.001;1000.0;0.001;10);
+stub.config:stub.defaultConfig;
 
 / Orderbook generation parameters
-obParams:`midPrice`spread`depth`volatility`tickSize!(100.0;0.02;10;0.001;0.01);
+stub.defaultOBParams:`midPrice`spread`depth`volatility`tickSize!(100.0;0.02;10;0.001;0.01);
+stub.obParams:stub.defaultOBParams;
 
 // ============================================================================
 // STATE TABLES
 // ============================================================================
 
 / Balances: currency -> amount
-balances:()!();
+stub.balances:()!();
 
 / Holds: currency -> held amount
-holds:()!();
+stub.holds:()!();
 
 / Orders table
-ordersSchema:([]
+stub.ordersSchema:([]
   orderId:`long$();
   pair:`symbol$();
   orderType:`symbol$();
@@ -64,27 +62,27 @@ ordersSchema:([]
   status:`symbol$();
   timestamp:`timestamp$()
  );
-orders:ordersSchema;
+stub.orders:stub.ordersSchema;
 
 / Fills table
-fillsSchema:([]
+stub.fillsSchema:([]
   fillId:`long$();
   orderId:`long$();
-  price:`long$();
-  quantity:`long$();
-  fee:`long$();
+  price:`float$();
+  quantity:`float$();
+  fee:`float$();
   timestamp:`timestamp$()
  );
-fills:fillsSchema;
+stub.fills:stub.fillsSchema;
 
 / Next order ID
-nextOrderId:1j;
+stub.nextOrderId:1j;
 
 / Next fill ID
-nextFillId:1j;
+stub.nextFillId:1j;
 
-/ Random seed for deterministic orderbook generation
-seed:42;
+/ Random stub.seed for deterministic orderbook generation
+stub.seed:42;
 
 // ============================================================================
 // INITIALIZATION
@@ -93,37 +91,40 @@ seed:42;
 / Initialize stub exchange
 / @param cfg dict - Configuration overrides (optional)
 / @return dict - Configuration
-init:{[cfg]
+stub.init:{[cfg]
+  stub.config::stub.defaultConfig;
+  stub.obParams::stub.defaultOBParams;
+
   / Apply configuration overrides
   if[count cfg;
-    config,:cfg
+    stub.config,:cfg
   ];
 
   / Initialize state
-  balances::()!();
-  holds::()!();
-  orders::ordersSchema;
-  fills::fillsSchema;
-  nextOrderId::1j;
-  nextFillId::1j;
+  stub.balances::()!();
+  stub.holds::()!();
+  stub.orders::stub.ordersSchema;
+  stub.fills::stub.fillsSchema;
+  stub.nextOrderId::1j;
+  stub.nextFillId::1j;
 
   / Log initialization
   -1 "  Stub exchange initialized";
 
-  config
+  stub.config
  };
 
-/ Set starting balances
+/ Set starting stub.balances
 / @param balancesDict dict - Currency -> amount
-setBalances:{[balancesDict]
-  balances::balancesDict;
-  holds::balancesDict!count[balancesDict]#0.0;
+stub.setBalances:{[balancesDict]
+  stub.balances::balancesDict;
+  stub.holds::(key balancesDict)!count[balancesDict]#0.0;
  };
 
 / Set orderbook parameters
 / @param params dict - Orderbook generation parameters
-setOBParams:{[params]
-  obParams,:params;
+stub.setOBParams:{[params]
+  stub.obParams,:params;
  };
 
 // ============================================================================
@@ -133,67 +134,67 @@ setOBParams:{[params]
 / Get total balance
 / @param currency symbol - Currency code
 / @return float - Total balance
-getTotalBalance:{[currency]
-  $[currency in key balances; balances[currency]; 0.0]
+stub.getTotalBalance:{[currency]
+  $[currency in key stub.balances; stub.balances[currency]; 0.0]
  };
 
-/ Get available balance (total - holds)
+/ Get available balance (total - stub.holds)
 / @param currency symbol - Currency code
 / @return float - Available balance
-getAvailableBalance:{[currency]
-  total:getTotalBalance[currency];
-  hold:$[currency in key holds; holds[currency]; 0.0];
+stub.getAvailableBalance:{[currency]
+  total:stub.getTotalBalance[currency];
+  hold:$[currency in key stub.holds; stub.holds[currency]; 0.0];
   total - hold
  };
 
 / Place hold on balance
 / @param currency symbol - Currency code
 / @param amount float - Amount to hold
-placeHold:{[currency;amount]
-  available:getAvailableBalance[currency];
+stub.placeHold:{[currency;amount]
+  available:stub.getAvailableBalance[currency];
   if[amount > available;
     '"Insufficient available balance"
   ];
 
   / Initialize hold if doesn't exist
-  if[not currency in key holds;
-    holds[currency]:0.0
+  if[not currency in key stub.holds;
+    stub.holds::stub.holds,enlist[currency]!enlist 0.0
   ];
 
-  holds[currency]+:amount;
+  stub.holds::stub.holds,enlist[currency]!enlist stub.holds[currency]+amount;
  };
 
 / Release hold on balance
 / @param currency symbol - Currency code
 / @param amount float - Amount to release
-releaseHold:{[currency;amount]
-  if[not currency in key holds;
-    '"No holds for currency"
+stub.releaseHold:{[currency;amount]
+  if[not currency in key stub.holds;
+    '"No stub.holds for currency"
   ];
 
-  current:holds[currency];
+  current:stub.holds[currency];
   if[amount > current;
     '"Cannot release more than held"
   ];
 
-  holds[currency]-:amount;
+  stub.holds::stub.holds,enlist[currency]!enlist current-amount;
  };
 
 / Update balance (add or subtract)
 / @param currency symbol - Currency code
 / @param delta float - Amount to add (positive) or subtract (negative)
-updateBalance:{[currency;delta]
+stub.updateBalance:{[currency;delta]
   / Initialize balance if doesn't exist
-  if[not currency in key balances;
-    balances[currency]:0.0
+  if[not currency in key stub.balances;
+    stub.balances::stub.balances,enlist[currency]!enlist 0.0
   ];
 
-  newBalance:balances[currency] + delta;
+  newBalance:stub.balances[currency] + delta;
   if[newBalance < 0.0;
     '"Balance cannot go negative"
   ];
 
-  balances[currency]:newBalance;
+  stub.balances::stub.balances,enlist[currency]!enlist newBalance;
  };
 
 // ============================================================================
@@ -206,16 +207,16 @@ updateBalance:{[currency;delta]
 / @param depth long - Number of levels per side
 / @param tick float - Tick size
 / @return dict - Bid and ask price arrays
-genPriceLevels:{[mid;spread;depth;tick]
+stub.genPriceLevels:{[mid;spread;depth;tick]
   half:mid * (spread % 2.0);
   bidMid:mid - half;
   askMid:mid + half;
 
   / Geometric spacing (tighter near top)
-  ratios:1.0 + (til depth) * 0.001;
+  ratioVals:1.0 + (til depth) * 0.001;
 
-  bidPrices:reverse tick * floor (bidMid * reverse ratios) % tick;
-  askPrices:tick * ceiling (askMid * ratios) % tick;
+  bidPrices:reverse tick * floor (bidMid * reverse ratioVals) % tick;
+  askPrices:tick * ceiling (askMid * ratioVals) % tick;
 
   `bid`ask!(bidPrices;askPrices)
  };
@@ -225,39 +226,38 @@ genPriceLevels:{[mid;spread;depth;tick]
 / @param minQty float - Minimum quantity
 / @param maxQty float - Maximum quantity
 / @return float[] - Quantities
-genQuantities:{[n;minQty;maxQty]
-  / Use seed for deterministic results
-  seed+::1;
-  .Q.srand seed;
+stub.genQuantities:{[n;minQty;maxQty]
+  / Use stub.seed for deterministic results
+  stub.seed+::1;
 
   / Exponential distribution
   vals:n?1.0;
-  exp:neg log 1.0 - vals;
+  expVals:neg log 1.0 - vals;
   / Scale to range
-  scaled:minQty + (exp % max exp) * (maxQty - minQty);
+  scaled:minQty + (expVals % max expVals) * (maxQty - minQty);
   scaled
  };
 
 / Generate synthetic orderbook
 / @return table - Orderbook with bid/ask levels
-genOrderbook:{[]
-  levels:genPriceLevels[
-    obParams`midPrice;
-    obParams`spread;
-    obParams`depth;
-    obParams`tickSize
+stub.genOrderbook:{[]
+  levels:stub.genPriceLevels[
+    stub.obParams`midPrice;
+    stub.obParams`spread;
+    stub.obParams`depth;
+    stub.obParams`tickSize
   ];
 
-  n:obParams`depth;
-  bidQty:genQuantities[n;config`minQty;config`maxQty];
-  askQty:genQuantities[n;config`minQty;config`maxQty];
+  n:stub.obParams`depth;
+  bidQty:stub.genQuantities[n;stub.config`minQty;stub.config`maxQty];
+  askQty:stub.genQuantities[n;stub.config`minQty;stub.config`maxQty];
 
   / Build orderbook table
   ob:([]
-    side:n#`bid,n#`ask;
+    side:(n#`bid),(n#`ask);
     price:levels[`bid],levels[`ask];
     quantity:bidQty,askQty;
-    timestamp:2*n#.z.p
+    timestamp:(2*n)#.z.p
   );
 
   / Sort: bids descending, asks ascending
@@ -278,44 +278,46 @@ genOrderbook:{[]
 / @param price long - Order price (null for market)
 / @param quantity long - Order quantity
 / @return dict - Order response
-submitOrder:{[pair;orderType;side;price;quantity]
+stub.submitOrder:{[pair;orderType;side;price;quantity]
   / Validate order parameters
   .exchange.validateOrderParams[orderType;side;price;quantity];
 
   / Assign order ID
-  oid:nextOrderId;
-  nextOrderId+::1;
+  oid:stub.nextOrderId;
+  stub.nextOrderId+::1;
 
   / Extract currencies from pair (assume XXXYYY format)
   pairStr:string pair;
   baseCurrency:`$3#pairStr;
   quoteCurrency:`$-3#pairStr;
 
-  / Place hold for buy orders (need quote currency)
+  / Place hold for buy stub.orders (need quote currency)
   if[side=`buy;
     required:$[orderType=`market;
-      quantity * obParams`midPrice * 1.1;  / Market orders: use mid + buffer
-      quantity * .qg.fromPrice[price]
+      (.qg.fromVolume[quantity]) * (stub.obParams`midPrice) * 1.1;  / Market stub.orders: use mid + buffer
+      (.qg.fromVolume[quantity]) * .qg.fromPrice[price]
     ];
-    placeHold[quoteCurrency;required]
+    stub.placeHold[quoteCurrency;required]
   ];
 
-  / Place hold for sell orders (need base currency)
+  / Place hold for sell stub.orders (need base currency)
   if[side=`sell;
-    placeHold[baseCurrency;.qg.fromVolume[quantity]]
+    stub.placeHold[baseCurrency;.qg.fromVolume[quantity]]
   ];
 
   / Create order record
-  `orders insert (oid;pair;orderType;side;price;quantity;0j;`pending;.z.p);
+  stub.orders::stub.orders,enlist `orderId`pair`orderType`side`price`quantity`filled`status`timestamp!(
+    oid;pair;orderType;side;price;quantity;0j;`pending;.z.p
+  );
 
   / Update status to open
-  update status:`open from `orders where orderId=oid;
+  stub.orders::update status:`open from stub.orders where orderId=oid;
 
   / Attempt to match
-  matchResult:matchOrder[oid;baseCurrency;quoteCurrency];
+  matchResult:stub.matchOrder[oid;baseCurrency;quoteCurrency];
 
   / Get final order state
-  ord:first select from orders where orderId=oid;
+  ord:first select from stub.orders where orderId=oid;
 
   / Return order response
   `orderId`pair`orderType`side`price`quantity`filled`status`timestamp!(
@@ -328,16 +330,16 @@ submitOrder:{[pair;orderType;side;price;quantity]
 / @param baseCurrency symbol - Base currency
 / @param quoteCurrency symbol - Quote currency
 / @return dict - Match result
-matchOrder:{[orderId;baseCurrency;quoteCurrency]
-  ord:first select from orders where orderId=orderId;
+stub.matchOrder:{[orderId;baseCurrency;quoteCurrency]
+  ord:first select from stub.orders where orderId=orderId;
   if[0 = count ord; '"Order not found"];
   if[not ord[`status] in `open`partially_filled; :()];
 
   / Get current orderbook
-  ob:genOrderbook[];
+  ob:stub.genOrderbook[];
 
   / Filter by opposing side
-  oppSide:`buy`sell (`sell`buy)?ord`side;
+  oppSide:$[ord[`side]=`buy; `ask; `bid];
   levels:select from ob where side=oppSide;
 
   / Match logic
@@ -346,51 +348,55 @@ matchOrder:{[orderId;baseCurrency;quoteCurrency]
 
   / Iterate through price levels
   i:0;
-  while[(remaining > 0.0) and (i < count levels)];
+  while[(remaining > 0.0) and (i < count levels);
     level:levels i;
 
-    / Check price matching - handle null price for market orders
+    / Check price matching - handle null price for market stub.orders
     orderPrice:$[null ord`price; 0n; .qg.fromPrice[ord`price]];
     matchable:$[ord[`orderType]=`market;
-      1b;  / Market orders always match
+      1b;  / Market stub.orders always match
       $[ord[`side]=`buy;
         level[`price] <= orderPrice;
         level[`price] >= orderPrice
       ]
     ];
 
-    if[not matchable; break];
+    if[not matchable; i:count levels; ];
 
-    / Calculate fill quantity
-    fillQty:min[remaining;level`quantity];
-    fillPrice:level`price;
+    if[matchable;
+      / Calculate fill quantity
+      fillQty:remaining & level`quantity;
+      fillPrice:level`price;
 
-    / Record fill
-    fillId:nextFillId;
-    nextFillId+::1;
+      / Record fill
+      fillId:stub.nextFillId;
+      stub.nextFillId+::1;
 
-    fee:fillQty * fillPrice * config`feeRate;
-    `fills insert (fillId;orderId;fillPrice;fillQty;fee;.z.p);
+      fee:fillQty * fillPrice * (stub.config`feeRate);
+      stub.fills::stub.fills,enlist `fillId`orderId`price`quantity`fee`timestamp!(
+        fillId;orderId;fillPrice;fillQty;fee;.z.p
+      );
 
-    / Update balances
-    if[ord[`side]=`buy;
-      / Buy: release quote hold, add base, deduct quote + fee
-      releaseHold[quoteCurrency;fillQty * fillPrice];
-      updateBalance[baseCurrency;fillQty];
-      updateBalance[quoteCurrency;neg (fillQty * fillPrice + fee)]
+      / Update stub.balances
+      if[ord[`side]=`buy;
+        / Buy: release quote hold, add base, deduct quote + fee
+        stub.releaseHold[quoteCurrency;fillQty * fillPrice];
+        stub.updateBalance[baseCurrency;fillQty];
+        stub.updateBalance[quoteCurrency;neg (fillQty * fillPrice + fee)]
+      ];
+
+      if[ord[`side]=`sell;
+        / Sell: release base hold, deduct base, add quote - fee
+        stub.releaseHold[baseCurrency;fillQty];
+        stub.updateBalance[baseCurrency;neg fillQty];
+        stub.updateBalance[quoteCurrency;fillQty * fillPrice - fee]
+      ];
+
+      / Update remaining and filled
+      remaining-:fillQty;
+      totalFilled+:fillQty;
+      i+:1;
     ];
-
-    if[ord[`side]=`sell;
-      / Sell: release base hold, deduct base, add quote - fee
-      releaseHold[baseCurrency;fillQty];
-      updateBalance[baseCurrency;neg fillQty];
-      updateBalance[quoteCurrency;fillQty * fillPrice - fee]
-    ];
-
-    / Update remaining and filled
-    remaining-:fillQty;
-    totalFilled+:fillQty;
-    i+:1;
   ];
 
   / Update order status and filled quantity
@@ -401,7 +407,7 @@ matchOrder:{[orderId;baseCurrency;quoteCurrency]
     `open
   ];
 
-  update filled:newFilled, status:newStatus from `orders where orderId=orderId;
+  stub.orders::update filled:newFilled, status:newStatus from stub.orders where orderId=orderId;
 
   `filled`remaining!(newFilled;.qg.toVolume[remaining])
  };
@@ -409,11 +415,11 @@ matchOrder:{[orderId;baseCurrency;quoteCurrency]
 / Cancel order
 / @param orderId long - Order ID
 / @return dict - Cancelled order
-cancelOrder:{[orderId]
-  ord:first select from orders where orderId=orderId;
+stub.cancelOrder:{[orderId]
+  ord:first select from stub.orders where orderId=orderId;
   if[0 = count ord; '"Order not found"];
   if[not ord[`status] in `open`partially_filled;
-    '"Cannot cancel order in status: ",string ord`status
+    '"Cannot stub.cancel order in status: ",string ord`status
   ];
 
   / Extract currencies from pair
@@ -424,22 +430,22 @@ cancelOrder:{[orderId]
   / Calculate remaining quantity
   remaining:.qg.fromVolume[ord[`quantity] - ord[`filled]];
 
-  / Release holds - handle null price for market orders
+  / Release stub.holds - handle null price for market stub.orders
   if[ord[`side]=`buy;
-    / For market orders, estimate hold based on mid price
+    / For market stub.orders, estimate hold based on mid price
     holdAmount:$[null ord`price;
-      remaining * obParams`midPrice;
+      remaining * (stub.obParams`midPrice);
       remaining * .qg.fromPrice[ord`price]
     ];
-    releaseHold[quoteCurrency;holdAmount]
+    stub.releaseHold[quoteCurrency;holdAmount]
   ];
 
   if[ord[`side]=`sell;
-    releaseHold[baseCurrency;remaining]
+    stub.releaseHold[baseCurrency;remaining]
   ];
 
   / Update status
-  update status:`cancelled from `orders where orderId=orderId;
+  stub.orders::update status:`cancelled from stub.orders where orderId=orderId;
 
   `orderId`status!(orderId;`cancelled)
  };
@@ -449,36 +455,36 @@ cancelOrder:{[orderId]
 // ============================================================================
 
 / Place order (exchange interface)
-placeOrder:{[pair;orderType;side;price;quantity]
-  submitOrder[pair;orderType;side;price;quantity]
+stub.placeOrder:{[pair;orderType;side;price;quantity]
+  stub.submitOrder[pair;orderType;side;price;quantity]
  };
 
 / Cancel order (exchange interface)
-cancel:{[orderId]
-  cancelOrder[orderId]
+stub.cancel:{[orderId]
+  stub.cancelOrder[orderId]
  };
 
 / Get balance (exchange interface)
-getBalance:{[currency]
-  total:getTotalBalance[currency];
-  available:getAvailableBalance[currency];
-  reserved:$[currency in key holds; holds[currency]; 0.0];
+stub.getBalance:{[currency]
+  total:stub.getTotalBalance[currency];
+  available:stub.getAvailableBalance[currency];
+  reserved:$[currency in key stub.holds; stub.holds[currency]; 0.0];
 
   `currency`total`available`reserved!(currency;total;available;reserved)
  };
 
 / Get orderbook (exchange interface)
-getOrderbook:{[pair]
-  genOrderbook[]
+stub.getOrderbook:{[pair]
+  stub.genOrderbook[]
  };
 
-/ Get open orders (exchange interface)
-getOpenOrders:{[pair]
-  select from orders where pair=pair, status in `open`partially_filled
+/ Get open stub.orders (exchange interface)
+stub.getOpenOrders:{[p]
+  select from stub.orders where pair=p, status in `open`partially_filled
  };
 
 / Get position (exchange interface - stub returns empty)
-getPosition:{[pair]
+stub.getPosition:{[pair]
   `pair`size`side!(pair;0j;`)
  };
 
@@ -487,15 +493,15 @@ getPosition:{[pair]
 // ============================================================================
 
 / Register stub exchange implementation
-registerStub:{[]
+stub.registerStub:{[]
   / Create implementation dict
-  impl:`placeOrder`cancelOrder`getBalance`getOrderbook`getOpenOrders`getPosition!(
-    placeOrder;
-    cancel;
-    getBalance;
-    getOrderbook;
-    getOpenOrders;
-    getPosition
+  impl:`stub.placeOrder`stub.cancelOrder`stub.getBalance`stub.getOrderbook`stub.getOpenOrders`stub.getPosition!(
+    stub.placeOrder;
+    stub.cancel;
+    stub.getBalance;
+    stub.getOrderbook;
+    stub.getOpenOrders;
+    stub.getPosition
   );
 
   / Register with registry

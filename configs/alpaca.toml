@@ -1,0 +1,35 @@
+# Alpaca exchange configuration
+#
+# API keys loaded from environment variables:
+# - ALPACA_API_KEY
+# - ALPACA_SECRET_KEY
+# - ALPACA_PAPER (optional, defaults to "true")
+
+[alpaca]
+# Paper trading mode (safe by default)
+paper_mode = true
+
+[alpaca.market_data]
+# Feed selection: "iex" (free, IEX exchange only) or "sip" (paid, all exchanges)
+feed = "iex"
+
+# Symbols to subscribe to for real-time data
+symbols = [
+    "AAPL",   # Apple Inc.
+    "TSLA",   # Tesla Inc.
+    "MSFT",   # Microsoft Corporation
+    "AMZN",   # Amazon.com Inc.
+    "GOOGL",  # Alphabet Inc. Class A
+    "META",   # Meta Platforms Inc.
+    "NVDA",   # NVIDIA Corporation
+    "SPY",    # SPDR S&P 500 ETF Trust
+    "QQQ",    # Invesco QQQ Trust
+    "IWM",    # iShares Russell 2000 ETF
+]
+
+[alpaca.kdb]
+# kdb+ Tickerplant connection
+tp_host = "localhost"
+tp_port = 5010
+tp_user = ""
+tp_password = ""

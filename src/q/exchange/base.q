@@ -1,18 +1,15 @@
 / ============================================================================
 / base.q - Exchange Wrapper Base Interface
 / ============================================================================
-/
-/ Provides:
+/ // Provides:
 /   - Abstract exchange interface with lifecycle state machine
 /   - Order type enumeration and validation
 /   - Order lifecycle state machine with transition validation
 /   - Dispatch to exchange-specific implementations via registry
-/
-/ Dependencies:
+/ // Dependencies:
 /   - types.q (validation, constants)
 /   - registry.q (exchange implementation registry)
-/
-/ Functions:
+/ // Functions:
 /   - placeOrder: Place an order on an exchange
 /   - cancelOrder: Cancel an existing order
 /   - getBalance: Get balance for a currency

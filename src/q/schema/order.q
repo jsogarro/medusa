@@ -1,19 +1,19 @@
 / ============================================================================
 / order.q - Order Management
 / ============================================================================
-/
+/ /
 / Provides:
 /   - Order lifecycle tracking (pending → open → filled)
 /   - Order CRUD operations with auto-increment IDs
 /   - Order queries by status, exchange, actor, time range
 /   - Fill tracking and statistics
-/
+/ /
 / Dependencies:
 /   - types.q (validation, constants, ID generator)
-/
+/ /
 / Tables:
 /   - order: Trading orders with metadata (keyed by order_id)
-/
+/ /
 / Functions:
 /   - Commands: createOrder, updateOrderStatus, updateOrderFill, cancelOrder
 /   - Queries: getOrder, getOrdersByStatus, getOrdersByExchange, getOpenOrders,
@@ -59,9 +59,7 @@ orderSchema:([]
 
 initOrderTable:{[]
   order::orderSchema;
-
-  / Create primary key
-  `order_id xkey `order;
+  .qg.publishTable[`order];
  };
 
 // ============================================================================
@@ -70,8 +68,19 @@ initOrderTable:{[]
 
 // Create new order
 // Usage: .qg.createOrder[`coinbase; `limit; `strategy1; `BTC; `USD; 1000000j; 50000000000j; ...]
-createOrder:{[exchangeName; orderType; actor; volumeCurrency; priceCurrency;
-               volume; price; fundamentalValue; competitiveness; spread; metaData]
+createOrder:{[args]
+  exchangeName:args 0;
+  orderType:args 1;
+  actor:args 2;
+  volumeCurrency:args 3;
+  priceCurrency:args 4;
+  volume:args 5;
+  price:args 6;
+  fundamentalValue:args 7;
+  competitiveness:args 8;
+  spread:args 9;
+  metaData:args 10;
+
   / Validate inputs
   if[not .qg.isValidExchange[exchangeName];
     '"Invalid exchange name"];
@@ -88,31 +97,32 @@ createOrder:{[exchangeName; orderType; actor; volumeCurrency; priceCurrency;
 
   / Generate new order ID and GUID
   ordId:.qg.nextId[`order];
-  guid:.Q.w[];
+  guid:first 1?0Ng;
 
   / Insert order
-  `order insert (
-    ordId;                               / order_id
-    guid;                                / unique_id
-    exchangeName;                        / exchange_name
-    `;                                   / exchange_order_id (null initially)
-    `pending;                            / status
-    orderType;                           / order_type
-    actor;                               / actor
-    price;                               / price
-    priceCurrency;                       / price_currency
-    volume;                              / volume
-    volumeCurrency;                      / volume_currency
-    0j;                                  / filled_volume
-    1.0;                                 / exchange_rate (default to 1)
-    fundamentalValue;                    / fundamental_value
-    competitiveness;                     / competitiveness
-    spread;                              / spread
-    .z.p;                                / time_created
-    .qg.NULL_TIMESTAMP;                                 / time_executed (null)
-    .z.p;                                / time_updated
-    metaData                             / meta_data
+  order::order,enlist `order_id`unique_id`exchange_name`exchange_order_id`status`order_type`actor`price`price_currency`volume`volume_currency`filled_volume`exchange_rate`fundamental_value`competitiveness`spread`time_created`time_executed`time_updated`meta_data!(
+    ordId;
+    guid;
+    exchangeName;
+    `;
+    `pending;
+    orderType;
+    actor;
+    price;
+    priceCurrency;
+    volume;
+    volumeCurrency;
+    0j;
+    1.0;
+    fundamentalValue;
+    competitiveness;
+    spread;
+    .z.p;
+    .qg.NULL_TIMESTAMP;
+    .z.p;
+    metaData
   );
+  .qg.publishTable[`order];
 
   ordId
  };
@@ -133,11 +143,13 @@ updateOrderStatus:{[orderId; newStatus; exchangeOrderId]
     '"Invalid status transition"];
 
   / Update order
-  update status:newStatus,
+  execTime:$[newStatus in `filled`partially_filled; .z.p; ord`time_executed];
+  order::update status:newStatus,
     exchange_order_id:exchangeOrderId,
-    time_executed:$[newStatus in `filled`partially_filled; .z.p; time_executed],
+    time_executed:execTime,
     time_updated:.z.p
-    from `order where order_id=orderId;
+    from order where order_id=orderId;
+  .qg.publishTable[`order];
 
   orderId
  };
@@ -158,11 +170,13 @@ updateOrderFill:{[orderId; filledVolume]
   ];
 
   / Update order
-  update filled_volume:filledVolume,
+  execTime:$[newStatus in `filled`partially_filled; .z.p; ord`time_executed];
+  order::update filled_volume:filledVolume,
     status:newStatus,
-    time_executed:$[newStatus in `filled`partially_filled; .z.p; time_executed],
+    time_executed:execTime,
     time_updated:.z.p
-    from `order where order_id=orderId;
+    from order where order_id=orderId;
+  .qg.publishTable[`order];
 
   orderId
  };
@@ -178,8 +192,9 @@ cancelOrder:{[orderId]
     '"Cannot cancel order in status: ", string ord[`status]];
 
   / Cancel
-  update status:`cancelled, time_updated:.z.p
-    from `order where order_id=orderId;
+  order::update status:`cancelled, time_updated:.z.p
+    from order where order_id=orderId;
+  .qg.publishTable[`order];
 
   orderId
  };

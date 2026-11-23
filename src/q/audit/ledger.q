@@ -1,19 +1,16 @@
 / ============================================================================
 / ledger.q - Ledger Consistency Audit
 / ============================================================================
-/
-/ Performs full consistency check across all ledger transactions:
+/ // Performs full consistency check across all ledger transactions:
 /   - Double-entry bookkeeping (debits = credits per currency)
 /   - No orphaned transactions (broken parent references)
 /   - Timestamp monotonicity (no backdated transactions)
 /   - Currency validity (all currencies recognized by money system)
-/
-/ Dependencies:
+/ // Dependencies:
 /   - audit.q (core infrastructure)
 /   - lib/money.q (.money.validCurrency)
 /   - schema/transaction.q (.qg.transaction table)
-/
-/ Usage:
+/ // Usage:
 /   .audit.LEDGER.validate[]
 /   .audit.run[`LEDGER_AUDIT]
 / ============================================================================

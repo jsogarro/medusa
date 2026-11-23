@@ -90,11 +90,7 @@ impl TradeSubscriber {
                         .await;
 
                     let delay = self.backoff.next_delay();
-                    warn!(
-                        "[{}] Reconnecting in {:?}",
-                        self.exchange_name(),
-                        delay
-                    );
+                    warn!("[{}] Reconnecting in {:?}", self.exchange_name(), delay);
                     time::sleep(delay).await;
                 }
             }
@@ -126,7 +122,12 @@ impl TradeSubscriber {
                 write
                     .send(Message::Text(line.to_string()))
                     .await
-                    .with_context(|| format!("Failed to send subscribe message to {}", self.exchange_name()))?;
+                    .with_context(|| {
+                        format!(
+                            "Failed to send subscribe message to {}",
+                            self.exchange_name()
+                        )
+                    })?;
                 debug!("[{}] Sent subscribe: {}", self.exchange_name(), line);
             }
         }
@@ -223,8 +224,17 @@ impl TradeSubscriber {
         info!("[{}] Backfilling recent trades", self.exchange_name());
 
         for symbol in &self.config.symbols {
-            match self.adapter.fetch_recent_trades(symbol, 100).await
-                .with_context(|| format!("Failed to backfill trades for {} {}", self.exchange_name(), symbol)) {
+            match self
+                .adapter
+                .fetch_recent_trades(symbol, 100)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to backfill trades for {} {}",
+                        self.exchange_name(),
+                        symbol
+                    )
+                }) {
                 Ok(trades) => {
                     info!(
                         "[{}] Backfilled {} trades for {}",

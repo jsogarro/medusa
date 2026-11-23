@@ -1,20 +1,20 @@
 / ============================================================================
 / trade.q - Trade Execution Tracking
 / ============================================================================
-/
+/ /
 / Provides:
 /   - Trade recording linked to orders
 /   - Volume-weighted average price (VWAP) calculation
 /   - Trade statistics and analytics
 /   - Realized P&L calculation
-/
+/ /
 / Dependencies:
 /   - types.q (validation, constants, ID generator)
 /   - order.q (FK: order_id)
-/
+/ /
 / Tables:
 /   - trade: Executed trades (keyed by trade_id, FK to order_id)
-/
+/ /
 / Functions:
 /   - Commands: createTrade, updateTrade
 /   - Queries: getTrade, getTradesForOrder, getTradesByExchange, getTradesByType,
@@ -57,9 +57,7 @@ tradeSchema:([]
 
 initTradeTable:{[]
   trade::tradeSchema;
-
-  / Create primary key
-  `trade_id xkey `trade;
+  .qg.publishTable[`trade];
  };
 
 // ============================================================================
@@ -68,9 +66,19 @@ initTradeTable:{[]
 
 // Record new trade
 // Usage: .qg.createTrade[`coinbase; `EXCH_TRD_123; 42j; `buy; 1000000j; 50000000000j; `BTC; `USD; 25000j; `USD; ...]
-createTrade:{[exchangeName; exchangeTradeId; orderId; tradeType;
-               volume; price; volumeCurrency; priceCurrency;
-               fee; feeCurrency; metaData]
+createTrade:{[args]
+  exchangeName:args 0;
+  exchangeTradeId:args 1;
+  orderId:args 2;
+  tradeType:args 3;
+  volume:args 4;
+  price:args 5;
+  volumeCurrency:args 6;
+  priceCurrency:args 7;
+  fee:args 8;
+  feeCurrency:args 9;
+  metaData:args 10;
+
   / Validate inputs
   if[not .qg.isValidExchange[exchangeName];
     '"Invalid exchange name"];
@@ -93,26 +101,27 @@ createTrade:{[exchangeName; exchangeTradeId; orderId; tradeType;
 
   / Generate new trade ID and GUID
   trdId:.qg.nextId[`trade];
-  guid:.Q.w[];
+  guid:first 1?0Ng;
 
   / Insert trade
-  `trade insert (
-    trdId;                               / trade_id
-    guid;                                / unique_id
-    exchangeName;                        / exchange_name
-    exchangeTradeId;                     / exchange_trade_id
-    orderId;                             / order_id
-    tradeType;                           / trade_type
-    price;                               / price
-    priceCurrency;                       / price_currency
-    volume;                              / volume
-    volumeCurrency;                      / volume_currency
-    fee;                                 / fee
-    feeCurrency;                         / fee_currency
-    .z.p;                                / time_created
-    .z.p;                                / time_updated
-    metaData                             / meta_data
+  trade::trade,enlist `trade_id`unique_id`exchange_name`exchange_trade_id`order_id`trade_type`price`price_currency`volume`volume_currency`fee`fee_currency`time_created`time_updated`meta_data!(
+    trdId;
+    guid;
+    exchangeName;
+    exchangeTradeId;
+    orderId;
+    tradeType;
+    price;
+    priceCurrency;
+    volume;
+    volumeCurrency;
+    fee;
+    feeCurrency;
+    .z.p;
+    .z.p;
+    metaData
   );
+  .qg.publishTable[`trade];
 
   / Update order filled volume
   currentFilled:ord[`filled_volume];
@@ -124,8 +133,9 @@ createTrade:{[exchangeName; exchangeTradeId; orderId; tradeType;
 
 // Update trade metadata
 updateTrade:{[tradeId; metaData]
-  update meta_data:metaData, time_updated:.z.p
-    from `trade where trade_id=tradeId;
+  trade::update meta_data:metaData, time_updated:.z.p
+    from trade where trade_id=tradeId;
+  .qg.publishTable[`trade];
 
   tradeId
  };

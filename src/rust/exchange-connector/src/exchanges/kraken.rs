@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use reqwest::{Client, header};
+use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::collections::HashMap;
@@ -124,12 +124,10 @@ impl KrakenClient {
         }
     }
 
-    /// Normalize pair format (e.g., "BTC/USD" -> "XBTUSDT")
-    /// Kraken uses special codes: BTC -> XBT, some pairs have Z/X prefixes
+    /// Normalize pair format for REST API
+    /// Note: WebSocket v2 uses standard symbols (BTC/USD), REST still uses legacy (XBTUSD)
     fn normalize_pair(pair: &str) -> String {
-        pair.replace('/', "")
-            .replace("BTC", "XBT")
-            .to_uppercase()
+        pair.replace('/', "").replace("BTC", "XBT").to_uppercase()
     }
 
     /// Parse Kraken error response
@@ -290,10 +288,16 @@ impl ExchangeClient for KrakenClient {
 
             // Security: Validate numeric bounds
             if !price.is_finite() || !(MIN_POSITIVE..=MAX_PRICE).contains(&price) {
-                return Err(ExchangeError::Other(format!("Price out of range: {}", price)));
+                return Err(ExchangeError::Other(format!(
+                    "Price out of range: {}",
+                    price
+                )));
             }
             if !quantity.is_finite() || !(0.0..=MAX_QUANTITY).contains(&quantity) {
-                return Err(ExchangeError::Other(format!("Quantity out of range: {}", quantity)));
+                return Err(ExchangeError::Other(format!(
+                    "Quantity out of range: {}",
+                    quantity
+                )));
             }
 
             Ok(PriceLevel { price, quantity })
@@ -472,7 +476,11 @@ impl ExchangeClient for KrakenClient {
         let order_type = match order.order_type {
             OrderType::Limit => "limit",
             OrderType::Market => "market",
-            _ => return Err(ExchangeError::InvalidRequest("Unsupported order type".into())),
+            _ => {
+                return Err(ExchangeError::InvalidRequest(
+                    "Unsupported order type".into(),
+                ))
+            }
         };
 
         let side = match order.side {
@@ -612,16 +620,10 @@ mod tests {
 
     #[test]
     fn test_parse_error() {
-        let err = KrakenClient::parse_error(
-            400,
-            r#"{"error": ["EGeneral:Invalid arguments"]}"#,
-        );
+        let err = KrakenClient::parse_error(400, r#"{"error": ["EGeneral:Invalid arguments"]}"#);
         assert!(matches!(err, ExchangeError::Other(_)));
 
-        let err = KrakenClient::parse_error(
-            400,
-            r#"{"error": ["EFunding:Insufficient funds"]}"#,
-        );
+        let err = KrakenClient::parse_error(400, r#"{"error": ["EFunding:Insufficient funds"]}"#);
         assert!(matches!(err, ExchangeError::InsufficientBalance(_)));
     }
 }

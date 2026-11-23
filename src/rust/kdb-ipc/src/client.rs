@@ -40,12 +40,7 @@ impl KdbClient {
     ///
     /// # Returns
     /// Connected client or error
-    pub async fn connect(
-        host: &str,
-        port: u16,
-        username: &str,
-        password: &str,
-    ) -> Result<Self> {
+    pub async fn connect(host: &str, port: u16, username: &str, password: &str) -> Result<Self> {
         tracing::info!("Connecting to kdb+ at {}:{}", host, port);
 
         let mut stream = TcpStream::connect(format!("{}:{}", host, port))
@@ -201,10 +196,7 @@ impl KdbClient {
 
     /// Disconnect from kdb+ process
     pub async fn disconnect(mut self) -> Result<()> {
-        self.stream
-            .shutdown()
-            .await
-            .map_err(KdbError::IoError)?;
+        self.stream.shutdown().await.map_err(KdbError::IoError)?;
         tracing::info!("Disconnected from kdb+");
         Ok(())
     }
@@ -220,9 +212,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_connect_and_query() {
-        let mut client = KdbClient::connect("localhost", 5001, "", "")
-            .await
-            .unwrap();
+        let mut client = KdbClient::connect("localhost", 5001, "", "").await.unwrap();
 
         let result = client.query("2+2").await.unwrap();
         assert!(matches!(result, KObject::Long(4)));
@@ -233,9 +223,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_send_async() {
-        let mut client = KdbClient::connect("localhost", 5001, "", "")
-            .await
-            .unwrap();
+        let mut client = KdbClient::connect("localhost", 5001, "", "").await.unwrap();
 
         let obj = KObject::CharList(b"show `async_test".to_vec());
         client.send_async(obj).await.unwrap();

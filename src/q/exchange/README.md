@@ -471,5 +471,4 @@ The exchange wrapper integrates with:
 ## References
 
 - [Gryphon Exchange Wrapper](https://github.com/gryphon-project/gryphon/blob/master/gryphon/exchange/exchange.py)
-- [Medusa Trading System Plans](/Users/ogarro/work/VAULT/Plans/medusa/)
 - [q/kdb+ Reference](https://code.kx.com/q/ref/)

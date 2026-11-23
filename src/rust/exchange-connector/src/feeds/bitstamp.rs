@@ -49,7 +49,7 @@ impl BitstampFeed {
         // Security: Validate pair format to prevent injection
         if !pair.chars().all(|c| c.is_alphanumeric()) {
             return Err(ExchangeError::InvalidRequest(
-                "Pair must contain only alphanumeric characters".into()
+                "Pair must contain only alphanumeric characters".into(),
             ));
         }
         let channel = format!("order_book_{}", pair.to_lowercase());
@@ -64,7 +64,7 @@ impl BitstampFeed {
         // Security: Validate pair format
         if !pair.chars().all(|c| c.is_alphanumeric()) {
             return Err(ExchangeError::InvalidRequest(
-                "Pair must contain only alphanumeric characters".into()
+                "Pair must contain only alphanumeric characters".into(),
             ));
         }
         let channel = format!("live_trades_{}", pair.to_lowercase());

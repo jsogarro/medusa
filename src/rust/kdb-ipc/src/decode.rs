@@ -400,9 +400,8 @@ impl Decoder {
                 )));
             }
         }
-        String::from_utf8(bytes).map_err(|e| {
-            KdbError::DecodingError(format!("Invalid UTF-8 in symbol: {}", e))
-        })
+        String::from_utf8(bytes)
+            .map_err(|e| KdbError::DecodingError(format!("Invalid UTF-8 in symbol: {}", e)))
     }
 }
 

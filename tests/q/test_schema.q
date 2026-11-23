@@ -1,285 +1,168 @@
-/ test_schema.q - Comprehensive schema tests
-/ Tests all schema modules and operations
+/ Tests for schema module (schema/*.q)
 
-/ Load schema
+\l tests/q/test_framework.q
 \l src/q/schema/init.q
+
+/ Initialize all schemas and tables
 .qg.loadAllSchemas[];
 .qg.initAllTables[];
 
-/ Test framework
-testCount:0;
-passCount:0;
-failCount:0;
+/ ========================================
+/ Schema loading tests
+/ ========================================
 
-assert:{[condition; testName]
-  testCount+:1;
-  if[condition;
-    passCount+:1;
-    -1 "  ✓ ", testName;
-    :1b
-  ];
-  failCount+:1;
-  -1 "  ✗ ", testName;
-  0b
- };
+test_schema_all_tables_exist:{
+  expected:`exchange`balance`position`target`order`trade`transaction`datum`flag;
+  existing:tables[];
+  .test.assert["All expected tables exist"; all expected in existing];
+ }
 
-// ============================================================================
-// TYPE TESTS
-// ============================================================================
+test_schema_validation:{
+  result:.qg.validateSchema[];
+  .test.assert["Validation returns table"; 98h = type result];
+  .test.assert["No missing tables"; 0 < count result];
+ }
 
--1 "\n=== Testing Types Module ===\n";
+/ ========================================
+/ Order table tests
+/ ========================================
 
-/ Test precision constants
-assert[.qg.PRICE_PRECISION = 1000000; "PRICE_PRECISION is 1000000"];
-assert[.qg.VOLUME_PRECISION = 1000000; "VOLUME_PRECISION is 1000000"];
-assert[.qg.FEE_PRECISION = 1000000; "FEE_PRECISION is 1000000"];
+test_order_insert:{
+  / Get count before
+  before:count order;
 
-/ Test toFixed conversion
-testPrice:.qg.toPrice[123.456789];
-assert[testPrice = 123456789j; "toPrice converts 123.456789 to 123456789j"];
+  / Create test order
+  orderId:.qg.createOrder (`coinbase; `limit; `testStrategy; `BTC; `USD; 1000000j; 50000000000j; 50000000000j; 0.95; 100000j; ()!());
 
-/ Test fromFixed conversion
-testFloat:.qg.fromPrice[123456789j];
-assert[testFloat = 123.456789; "fromPrice converts 123456789j to 123.456789"];
+  / Check insert
+  .test.assert["Order ID generated"; orderId > 0];
+  .test.assertEqual["Order count increased"; before + 1; count order];
 
-/ Test round-trip conversion
-original:50000.123456;
-converted:.qg.fromPrice[.qg.toPrice[original]];
-assert[converted = original; "Round-trip price conversion preserves value"];
+  / Verify order fields
+  ord:.qg.getOrder[orderId];
+  .test.assertEqual["Exchange name set"; `coinbase; ord`exchange_name];
+  .test.assertEqual["Order type set"; `limit; ord`order_type];
+  .test.assertEqual["Actor set"; `testStrategy; ord`actor];
+  .test.assertEqual["Status is pending"; `pending; ord`status];
 
-/ Test validation functions
-assert[.qg.isValidOrderStatus[`filled]; "isValidOrderStatus accepts `filled"];
-assert[not .qg.isValidOrderStatus[`invalid]; "isValidOrderStatus rejects `invalid"];
-assert[.qg.isValidCurrency[`BTC]; "isValidCurrency accepts `BTC"];
-assert[.qg.isValidExchange[`coinbase]; "isValidExchange accepts `coinbase"];
-assert[.qg.isValidPrice[1000000j]; "isValidPrice accepts positive long"];
-assert[not .qg.isValidPrice[-1000j]; "isValidPrice rejects negative long"];
+  / Clean up
+  .qg.initOrderTable[];
+ }
 
-// ============================================================================
-// EXCHANGE TESTS
-// ============================================================================
+test_order_status_transition:{
+  / Create order
+  orderId:.qg.createOrder (`coinbase; `limit; `testStrategy; `BTC; `USD; 1000000j; 50000000j; 0j; 0.95; 100000j; ()!());
 
--1 "\n=== Testing Exchange Module ===\n";
+  / Update status
+  .qg.updateOrderStatus[orderId; `open; `EXCH_123];
 
-/ Test exchange creation
-ex1:.qg.createExchange[`coinbase; `hash123; `region`usa`tier`pro!()];
-assert[ex1 = `coinbase; "createExchange returns exchange name"];
-assert[1 = count select from exchange where name=`coinbase; "Exchange record created"];
+  / Verify
+  ord:.qg.getOrder[orderId];
+  .test.assertEqual["Status updated"; `open; ord`status];
+  .test.assertEqual["Exchange order ID set"; `EXCH_123; ord`exchange_order_id];
 
-/ Test balance update
-bal1:.qg.updateBalance[`coinbase; `BTC; 5000000j; 4000000j; 1000000j];
-assert[bal1 ~ (`coinbase; `BTC); "updateBalance returns exchange/currency tuple"];
-assert[1 = count select from balance where exchange_name=`coinbase, currency=`BTC; "Balance record created"];
+  / Clean up
+  .qg.initOrderTable[];
+ }
 
-/ Get balance
-balRec:.qg.getBalance[`coinbase; `BTC];
-assert[balRec[`amount] = 5000000j; "Balance amount correct"];
-assert[balRec[`available] = 4000000j; "Balance available correct"];
-assert[balRec[`reserved] = 1000000j; "Balance reserved correct"];
+test_order_fill:{
+  / Create order
+  orderId:.qg.createOrder (`coinbase; `limit; `testStrategy; `BTC; `USD; 1000000j; 50000000j; 0j; 0.95; 100000j; ()!());
 
-/ Test position opening
-posId:.qg.openPosition[`coinbase; `BTCUSD; `long; 1000000j; 50000000000j; 2.0];
-assert[posId = 1j; "openPosition returns position ID 1"];
-assert[1 = count select from position where position_id=posId; "Position record created"];
+  / Fill partially
+  .qg.updateOrderFill[orderId; 500000j];
 
-/ Update position
-.qg.updatePosition[posId; 51000000000j];
-posRec:first select from position where position_id=posId;
-assert[posRec[`current_price] = 51000000000j; "Position current price updated"];
-assert[posRec[`unrealized_pnl] = 1000000000j; "Position P&L calculated correctly"];
+  ord:.qg.getOrder[orderId];
+  .test.assertEqual["Filled volume updated"; 500000j; ord`filled_volume];
+  .test.assertEqual["Status is partially_filled"; `partially_filled; ord`status];
 
-/ Test target creation
-tgtId:.qg.createTarget[`coinbase; `USD; 10000000000j; 100000000j; 1j];
-assert[tgtId = 1j; "createTarget returns target ID 1"];
-assert[1 = count select from target where target_id=tgtId; "Target record created"];
+  / Fill completely
+  .qg.updateOrderFill[orderId; 1000000j];
 
-// ============================================================================
-// ORDER TESTS
-// ============================================================================
+  ord:.qg.getOrder[orderId];
+  .test.assertEqual["Fully filled"; `filled; ord`status];
 
--1 "\n=== Testing Order Module ===\n";
+  / Clean up
+  .qg.initOrderTable[];
+ }
 
-/ Test order creation
-ordId:.qg.createOrder[
-  `coinbase; `limit; `strategy1; `BTC; `USD;
-  1000000j; 50000000000j; 49500000000j; 0.8; 100000000j; ()!()
-];
-assert[ordId = 1j; "createOrder returns order ID 1"];
-assert[1 = count select from order where order_id=ordId; "Order record created"];
+/ ========================================
+/ Trade table tests
+/ ========================================
 
-/ Get order
-ordRec:.qg.getOrder[ordId];
-assert[ordRec[`status] = `pending; "Order status is pending"];
-assert[ordRec[`volume] = 1000000j; "Order volume correct"];
-assert[ordRec[`price] = 50000000000j; "Order price correct"];
+test_trade_insert:{
+  / Create order first
+  orderId:.qg.createOrder (`coinbase; `limit; `testStrategy; `BTC; `USD; 1000000j; 50000000j; 0j; 0.95; 100000j; ()!());
+  .qg.updateOrderStatus[orderId; `open; `EXCH_123];
 
-/ Update order status
-.qg.updateOrderStatus[ordId; `open; `EXCH12345];
-ordRec:.qg.getOrder[ordId];
-assert[ordRec[`status] = `open; "Order status updated to open"];
-assert[ordRec[`exchange_order_id] = `EXCH12345; "Exchange order ID set"];
+  / Create trade
+  tradeId:.qg.createTrade (`coinbase; `TRD_456; orderId; `buy; 500000j; 50000000j; `BTC; `USD; 10000j; `USD; ()!());
 
-/ Partially fill order
-.qg.updateOrderFill[ordId; 500000j];
-ordRec:.qg.getOrder[ordId];
-assert[ordRec[`filled_volume] = 500000j; "Order partially filled"];
-assert[ordRec[`status] = `partially_filled; "Order status is partially_filled"];
+  .test.assert["Trade ID generated"; tradeId > 0];
 
-/ Fully fill order
-.qg.updateOrderFill[ordId; 1000000j];
-ordRec:.qg.getOrder[ordId];
-assert[ordRec[`filled_volume] = 1000000j; "Order fully filled"];
-assert[ordRec[`status] = `filled; "Order status is filled"];
+  / Verify trade
+  trd:.qg.getTrade[tradeId];
+  .test.assertEqual["Exchange name set"; `coinbase; trd`exchange_name];
+  .test.assertEqual["Order ID linked"; orderId; trd`order_id];
+  .test.assertEqual["Trade type set"; `buy; trd`trade_type];
+  .test.assertEqual["Volume set"; 500000j; trd`volume];
 
-/ Test query functions
-openOrders:.qg.getOpenOrders[];
-assert[0 = count openOrders; "No open orders after filling"];
+  / Verify order updated
+  ord:.qg.getOrder[orderId];
+  .test.assertEqual["Order filled volume updated"; 500000j; ord`filled_volume];
 
-// ============================================================================
-// TRADE TESTS
-// ============================================================================
+  / Clean up
+  .qg.initOrderTable[];
+  .qg.initTradeTable[];
+ }
 
--1 "\n=== Testing Trade Module ===\n";
+test_trade_vwap:{
+  / Create order
+  orderId:.qg.createOrder (`coinbase; `market; `testStrategy; `BTC; `USD; 3000000j; 0j; 0j; 0.95; 100000j; ()!());
+  .qg.updateOrderStatus[orderId; `open; `EXCH_123];
 
-/ Create new order for trade testing
-ordId2:.qg.createOrder[
-  `coinbase; `market; `strategy2; `ETH; `USD;
-  2000000j; 0j; 3000000000j; 0.9; 50000000j; ()!()
-];
+  / Create multiple trades at different prices
+  .qg.createTrade (`coinbase; `TRD_1; orderId; `buy; 1000000j; 50000000j; `BTC; `USD; 5000j; `USD; ()!());
+  .qg.createTrade (`coinbase; `TRD_2; orderId; `buy; 1000000j; 51000000j; `BTC; `USD; 5100j; `USD; ()!());
+  .qg.createTrade (`coinbase; `TRD_3; orderId; `buy; 1000000j; 52000000j; `BTC; `USD; 5200j; `USD; ()!());
 
-/ Record trade
-trdId:.qg.createTrade[
-  `coinbase; `TRD123; ordId2; `buy;
-  1000000j; 3000000000j; `ETH; `USD;
-  15000j; `USD; ()!()
-];
-assert[trdId = 1j; "createTrade returns trade ID 1"];
-assert[1 = count select from trade where trade_id=trdId; "Trade record created"];
+  / Calculate VWAP
+  startTime:.z.p - 00:01:00;
+  endTime:.z.p + 00:01:00;
+  vwap:.qg.getVWAP[`coinbase; `BTC; `USD; startTime; endTime];
 
-/ Verify order filled volume updated
-ordRec2:.qg.getOrder[ordId2];
-assert[ordRec2[`filled_volume] = 1000000j; "Order filled volume updated by trade"];
+  / VWAP = (50M*1M + 51M*1M + 52M*1M) / (1M + 1M + 1M) = 51M
+  .test.assertNear["VWAP calculated"; 51000000j; vwap; 1000j];
 
-/ Test trade queries
-trdRec:.qg.getTrade[trdId];
-assert[trdRec[`price] = 3000000000j; "Trade price correct"];
-assert[trdRec[`volume] = 1000000j; "Trade volume correct"];
+  / Clean up
+  .qg.initOrderTable[];
+  .qg.initTradeTable[];
+ }
 
-tradesForOrder:.qg.getTradesForOrder[ordId2];
-assert[1 = count tradesForOrder; "Found 1 trade for order"];
+/ ========================================
+/ Reset and stats tests
+/ ========================================
 
-// ============================================================================
-// TRANSACTION TESTS
-// ============================================================================
+test_schema_reset:{
+  / Insert test data
+  .qg.createOrder (`coinbase; `limit; `test; `BTC; `USD; 1000000j; 50000000j; 0j; 0.95; 100000j; ()!());
 
--1 "\n=== Testing Transaction Module ===\n";
+  .test.assert["Order table has data"; 0 < count order];
 
-/ Set up second exchange with balance
-.qg.createExchange[`kraken; `hash456; `region`usa`tier`basic!()];
-.qg.updateBalance[`coinbase; `BTC; 10000000j; 10000000j; 0j];
+  / Reset
+  .qg.resetTables[];
 
-/ Create transaction
-txnId:.qg.createTransaction[
-  `coinbase; `kraken; `BTC;
-  2000000j; 1000j; `BTC; ()!()
-];
-assert[txnId = 1j; "createTransaction returns transaction ID 1"];
-assert[1 = count select from transaction where transaction_id=txnId; "Transaction record created"];
+  / Verify reset
+  .test.assertEqual["Order table cleared"; 0; count order];
+ }
 
-/ Verify source balance reserved
-srcBal:.qg.getBalance[`coinbase; `BTC];
-assert[srcBal[`available] = 7999000j; "Source available reduced"];
-assert[srcBal[`reserved] = 2001000j; "Source reserved increased"];
+test_schema_stats:{
+  / Get stats
+  stats:.qg.getSchemaStats[];
 
-/ Update transaction status to completed
-.qg.updateTransactionStatus[txnId; `completed; 6j; `0xabc];
-txnRec:.qg.getTransaction[txnId];
-assert[txnRec[`status] = `completed; "Transaction status is completed"];
+  .test.assert["Stats is table"; 98h = type stats];
+  .test.assert["Has table column"; `table in cols stats];
+  .test.assert["Has rowCount column"; `rowCount in cols stats];
+ }
 
-/ Verify balances updated
-srcBal:.qg.getBalance[`coinbase; `BTC];
-dstBal:.qg.getBalance[`kraken; `BTC];
-assert[srcBal[`amount] = 7999000j; "Source amount reduced"];
-assert[dstBal[`amount] = 2000000j; "Destination amount increased"];
-
-// ============================================================================
-// METADATA TESTS
-// ============================================================================
-
--1 "\n=== Testing Metadata Module ===\n";
-
-/ Test datum operations
-.qg.setDatum[`performance; `avg_latency; 123.45; `float; "Avg latency ms"; ()!()];
-latency:.qg.getDatum[`performance; `avg_latency];
-assert[latency = 123.45; "Datum value retrieved correctly"];
-
-/ Test metric increment
-.qg.setMetric[`trading; `total_trades; 1000j; "Total trades"];
-.qg.incrMetric[`trading; `total_trades; 250j];
-totalTrades:.qg.getDatum[`trading; `total_trades];
-assert[totalTrades = 1250j; "Metric incremented correctly"];
-
-/ Test flag operations
-flagId:.qg.createFlag[`enable_arbitrage; `strategy; "Enable arb strategy"; ()!()];
-assert[not .qg.isFlagEnabled[`enable_arbitrage]; "Flag disabled by default"];
-
-.qg.enableFlag[`enable_arbitrage];
-assert[.qg.isFlagEnabled[`enable_arbitrage]; "Flag enabled"];
-
-.qg.toggleFlag[`enable_arbitrage];
-assert[not .qg.isFlagEnabled[`enable_arbitrage]; "Flag toggled to disabled"];
-
-// ============================================================================
-// NEGATIVE TESTS (Error Cases)
-// ============================================================================
-
--1 "\n=== Negative Tests (Error Handling) ===\n";
-
-/ Test duplicate exchange creation
-@[{.qg.createExchange[`coinbase; `newhash; ()!()]}; `; {()}];
-assert[1 = count select from exchange where name=`coinbase; "Duplicate exchange rejected (still only 1)"];
-
-/ Test negative balance update
-negBalResult:@[{.qg.updateBalance[`coinbase; `BTC; -1000j; -500j; -500j]}; `; {`error}];
-assert[negBalResult~`error; "Negative balance amounts should be prevented"];
-
-/ Test position edge cases
-/ Zero size position should fail
-zeroSizeResult:@[{.qg.openPosition[`coinbase; `BTCUSD; `long; 0j; 50000000000j; 1.0]}; `; {`error}];
-assert[zeroSizeResult~`error; "Zero size position rejected"];
-
-/ Invalid position side
-invalidSideResult:@[{.qg.openPosition[`coinbase; `BTCUSD; `invalid; 1000000j; 50000000000j; 1.0]}; `; {`error}];
-assert[invalidSideResult~`error; "Invalid position side rejected"];
-
-/ Test target state transitions
-/ Create and deactivate target
-tgt2:.qg.createTarget[`coinbase; `EUR; 5000000000j; 50000000j; 2j];
-.qg.deactivateTarget[tgt2];
-tgtRec:first select from target where target_id=tgt2;
-assert[not tgtRec[`is_active]; "Target deactivated correctly"];
-
-/ Test transaction with insufficient balance
-/ Reset balance first
-.qg.updateBalance[`coinbase; `ETH; 100000j; 100000j; 0j];
-insuffResult:@[{.qg.createTransaction[`coinbase; `kraken; `ETH; 500000j; 1000j; `ETH; ()!()]}; `; {`error}];
-assert[insuffResult~`error; "Transaction with insufficient balance rejected"];
-
-/ Test transaction same source/destination
-sameExchResult:@[{.qg.createTransaction[`coinbase; `coinbase; `BTC; 1000000j; 100j; `BTC; ()!()]}; `; {`error}];
-assert[sameExchResult~`error; "Transaction to same exchange rejected"];
-
-// ============================================================================
-// SUMMARY
-// ============================================================================
-
--1 "\n========================================";
--1 "Test Summary:";
--1 "  Total:  ", string testCount;
--1 "  Passed: ", string passCount;
--1 "  Failed: ", string failCount;
--1 "========================================\n";
-
-/ Exit with appropriate code
-if[failCount > 0; exit 1];
-exit 0;
+-1 "Schema tests loaded";

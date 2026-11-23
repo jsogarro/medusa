@@ -51,6 +51,9 @@ hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
+# JWT for Coinbase Advanced Trade
+jsonwebtoken = "9"
+rand = "0.8"
 
 # Async trait
 async-trait = "0.1"

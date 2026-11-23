@@ -1,20 +1,26 @@
 services:
   # kdb+ Tickerplant + RDB (development)
   kdb:
-    image: kx/kdb:latest
+    image: kdb-l32:latest
+    platform: linux/386
     container_name: medusa-kdb
+    working_dir: /opt/medusa/src/q
     ports:
       - "5010:5010"  # Tickerplant
       - "5011:5011"  # RDB
       - "5012:5012"  # HDB
     volumes:
-      - ./src/q:/opt/medusa/q:ro
+      - ${QHOME:-${HOME}/q}/kc-linux.lic:/opt/kdb/kc.lic:ro
+      - ./src:/opt/medusa/src:ro
+      - ./tests:/opt/medusa/tests:ro
+      - ./configs:/opt/medusa/configs:ro
       - ./data:/opt/medusa/data:rw
       - ./logs:/opt/medusa/logs:rw
     environment:
       - QHOME=/opt/kdb
+      - QLIC=/opt/kdb
       - MEDUSA_ROOT=/opt/medusa
-    command: ["q", "/opt/medusa/q/init.q", "-p", "5010"]
+    command: ["q", "init.q", "-p", "5010"]
     networks:
       - medusa-net
     restart: unless-stopped

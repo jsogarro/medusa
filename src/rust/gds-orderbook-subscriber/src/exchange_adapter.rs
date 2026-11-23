@@ -135,12 +135,11 @@ impl ExchangeAdapter for BitstampAdapter {
     }
 
     async fn fetch_snapshot(&self, symbol: &str) -> Result<SnapshotData> {
-        let url = format!(
-            "{}/order_book/{}/",
-            self.rest_url,
-            symbol.to_lowercase()
-        );
-        let response = reqwest::get(&url).await?.json::<BitstampOrderBookResponse>().await?;
+        let url = format!("{}/order_book/{}/", self.rest_url, symbol.to_lowercase());
+        let response = reqwest::get(&url)
+            .await?
+            .json::<BitstampOrderBookResponse>()
+            .await?;
 
         let bids = parse_bitstamp_levels(&serde_json::to_value(&response.bids)?)?;
         let asks = parse_bitstamp_levels(&serde_json::to_value(&response.asks)?)?;
@@ -168,10 +167,14 @@ struct BitstampOrderBookResponse {
 }
 
 fn parse_bitstamp_levels(value: &serde_json::Value) -> Result<Vec<[f64; 2]>> {
-    let arr = value.as_array().ok_or_else(|| anyhow::anyhow!("Expected array"))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Expected array"))?;
     let mut levels = Vec::new();
     for item in arr {
-        let inner = item.as_array().ok_or_else(|| anyhow::anyhow!("Expected inner array"))?;
+        let inner = item
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Expected inner array"))?;
         if inner.len() >= 2 {
             let price = inner[0].as_str().unwrap_or("0").parse::<f64>()?;
             let qty = inner[1].as_str().unwrap_or("0").parse::<f64>()?;
@@ -187,11 +190,21 @@ fn parse_bitstamp_levels(value: &serde_json::Value) -> Result<Vec<[f64; 2]>> {
 
 pub struct CoinbaseAdapter {
     rest_url: String,
+    #[allow(dead_code)]
+    use_advanced: bool,
 }
 
 impl CoinbaseAdapter {
     pub fn new(rest_url: String) -> Self {
-        Self { rest_url }
+        let use_advanced = std::env::var("COINBASE_USE_ADVANCED_TRADE")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase()
+            == "true";
+
+        Self {
+            rest_url,
+            use_advanced,
+        }
     }
 }
 
@@ -202,75 +215,154 @@ impl ExchangeAdapter for CoinbaseAdapter {
     }
 
     fn build_subscribe_message(&self, symbols: &[String]) -> String {
-        serde_json::json!({
-            "type": "subscribe",
-            "product_ids": symbols,
-            "channels": ["level2"]
-        })
-        .to_string()
+        if self.use_advanced {
+            serde_json::json!({
+                "type": "subscribe",
+                "product_ids": symbols,
+                "channel": "level2"
+            })
+            .to_string()
+        } else {
+            serde_json::json!({
+                "type": "subscribe",
+                "product_ids": symbols,
+                "channels": ["level2"]
+            })
+            .to_string()
+        }
     }
 
     fn parse_message(&self, text: &str) -> Result<ExchangeMessage> {
         let msg: serde_json::Value = serde_json::from_str(text)?;
 
-        let msg_type = msg["type"].as_str().unwrap_or("");
+        if self.use_advanced {
+            // Advanced Trade API format
+            let channel = msg.get("channel").and_then(|c| c.as_str());
 
-        match msg_type {
-            "snapshot" => {
-                let symbol = msg["product_id"].as_str().unwrap_or("").to_string();
-                let bids = parse_coinbase_levels(&msg["bids"])?;
-                let asks = parse_coinbase_levels(&msg["asks"])?;
+            if channel == Some("level2") || channel == Some("l2_data") {
+                let events = msg
+                    .get("events")
+                    .and_then(|e| e.as_array())
+                    .ok_or_else(|| anyhow::anyhow!("Missing events array"))?;
 
-                Ok(ExchangeMessage::Snapshot {
-                    symbol,
-                    bids,
-                    asks,
-                    sequence: 0, // Snapshots don't have sequence
-                })
-            }
-            "l2update" => {
-                let symbol = msg["product_id"].as_str().unwrap_or("").to_string();
-                let changes = msg["changes"].as_array().ok_or_else(|| anyhow::anyhow!("Expected changes array"))?;
-
-                let mut bids = Vec::new();
-                let mut asks = Vec::new();
-
-                for change in changes {
-                    let change_arr = change.as_array().ok_or_else(|| anyhow::anyhow!("Expected change array"))?;
-                    if change_arr.len() >= 3 {
-                        let side = change_arr[0].as_str().unwrap_or("");
-                        let price = change_arr[1].as_str().unwrap_or("0").parse::<f64>()?;
-                        let size = change_arr[2].as_str().unwrap_or("0").parse::<f64>()?;
-
-                        match side {
-                            "buy" => bids.push([price, size]),
-                            "sell" => asks.push([price, size]),
-                            _ => {}
-                        }
-                    }
+                if events.is_empty() {
+                    return Ok(ExchangeMessage::Other);
                 }
 
-                let sequence = msg["time"]
-                    .as_str()
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.timestamp_micros() as u64)
-                    .unwrap_or(0);
+                let event = &events[0];
+                let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-                Ok(ExchangeMessage::Delta {
-                    symbol,
-                    bids,
-                    asks,
-                    sequence,
-                })
+                match event_type {
+                    "snapshot" => {
+                        let symbol = event
+                            .get("product_id")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let bids = parse_coinbase_levels_advanced(&event["updates"], "bid")?;
+                        let asks = parse_coinbase_levels_advanced(&event["updates"], "offer")?;
+
+                        Ok(ExchangeMessage::Snapshot {
+                            symbol,
+                            bids,
+                            asks,
+                            sequence: 0,
+                        })
+                    }
+                    "update" => {
+                        let symbol = event
+                            .get("product_id")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let bids = parse_coinbase_levels_advanced(&event["updates"], "bid")?;
+                        let asks = parse_coinbase_levels_advanced(&event["updates"], "offer")?;
+
+                        let sequence = msg
+                            .get("sequence_num")
+                            .and_then(|s| s.as_u64())
+                            .unwrap_or(0);
+
+                        Ok(ExchangeMessage::Delta {
+                            symbol,
+                            bids,
+                            asks,
+                            sequence,
+                        })
+                    }
+                    _ => Ok(ExchangeMessage::Other),
+                }
+            } else {
+                Ok(ExchangeMessage::Other)
             }
-            "subscriptions" | "heartbeat" => Ok(ExchangeMessage::Heartbeat),
-            _ => Ok(ExchangeMessage::Other),
+        } else {
+            // Legacy API format
+            let msg_type = msg["type"].as_str().unwrap_or("");
+
+            match msg_type {
+                "snapshot" => {
+                    let symbol = msg["product_id"].as_str().unwrap_or("").to_string();
+                    let bids = parse_coinbase_levels(&msg["bids"])?;
+                    let asks = parse_coinbase_levels(&msg["asks"])?;
+
+                    Ok(ExchangeMessage::Snapshot {
+                        symbol,
+                        bids,
+                        asks,
+                        sequence: 0,
+                    })
+                }
+                "l2update" => {
+                    let symbol = msg["product_id"].as_str().unwrap_or("").to_string();
+                    let changes = msg["changes"]
+                        .as_array()
+                        .ok_or_else(|| anyhow::anyhow!("Expected changes array"))?;
+
+                    let mut bids = Vec::new();
+                    let mut asks = Vec::new();
+
+                    for change in changes {
+                        let change_arr = change
+                            .as_array()
+                            .ok_or_else(|| anyhow::anyhow!("Expected change array"))?;
+                        if change_arr.len() >= 3 {
+                            let side = change_arr[0].as_str().unwrap_or("");
+                            let price = change_arr[1].as_str().unwrap_or("0").parse::<f64>()?;
+                            let size = change_arr[2].as_str().unwrap_or("0").parse::<f64>()?;
+
+                            match side {
+                                "buy" => bids.push([price, size]),
+                                "sell" => asks.push([price, size]),
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    let sequence = msg["time"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp_micros() as u64)
+                        .unwrap_or(0);
+
+                    Ok(ExchangeMessage::Delta {
+                        symbol,
+                        bids,
+                        asks,
+                        sequence,
+                    })
+                }
+                "subscriptions" | "heartbeat" => Ok(ExchangeMessage::Heartbeat),
+                _ => Ok(ExchangeMessage::Other),
+            }
         }
     }
 
     async fn fetch_snapshot(&self, symbol: &str) -> Result<SnapshotData> {
         let url = format!("{}/products/{}/book?level=2", self.rest_url, symbol);
-        let response = reqwest::get(&url).await?.json::<CoinbaseOrderBookResponse>().await?;
+        let response = reqwest::get(&url)
+            .await?
+            .json::<CoinbaseOrderBookResponse>()
+            .await?;
 
         let bids = parse_coinbase_levels(&serde_json::to_value(&response.bids)?)?;
         let asks = parse_coinbase_levels(&serde_json::to_value(&response.asks)?)?;
@@ -292,16 +384,53 @@ struct CoinbaseOrderBookResponse {
 }
 
 fn parse_coinbase_levels(value: &serde_json::Value) -> Result<Vec<[f64; 2]>> {
-    let arr = value.as_array().ok_or_else(|| anyhow::anyhow!("Expected array"))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Expected array"))?;
     let mut levels = Vec::new();
     for item in arr {
-        let inner = item.as_array().ok_or_else(|| anyhow::anyhow!("Expected inner array"))?;
+        let inner = item
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Expected inner array"))?;
         if inner.len() >= 2 {
             let price = inner[0].as_str().unwrap_or("0").parse::<f64>()?;
             let qty = inner[1].as_str().unwrap_or("0").parse::<f64>()?;
             levels.push([price, qty]);
         }
     }
+    Ok(levels)
+}
+
+fn parse_coinbase_levels_advanced(
+    updates: &serde_json::Value,
+    side_filter: &str,
+) -> Result<Vec<[f64; 2]>> {
+    let arr = updates
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Expected updates array"))?;
+    let mut levels = Vec::new();
+
+    for update in arr {
+        let side = update.get("side").and_then(|s| s.as_str()).unwrap_or("");
+        if side != side_filter {
+            continue;
+        }
+
+        let price_str = update
+            .get("price_level")
+            .and_then(|p| p.as_str())
+            .unwrap_or("0");
+        let qty_str = update
+            .get("new_quantity")
+            .and_then(|q| q.as_str())
+            .unwrap_or("0");
+
+        let price = price_str.parse::<f64>()?;
+        let qty = qty_str.parse::<f64>()?;
+
+        levels.push([price, qty]);
+    }
+
     Ok(levels)
 }
 
@@ -331,10 +460,10 @@ impl ExchangeAdapter for KrakenAdapter {
 
     fn build_subscribe_message(&self, symbols: &[String]) -> String {
         serde_json::json!({
-            "event": "subscribe",
-            "pair": symbols,
-            "subscription": {
-                "name": "book",
+            "method": "subscribe",
+            "params": {
+                "channel": "book",
+                "symbol": symbols,
                 "depth": 25
             }
         })
@@ -344,70 +473,82 @@ impl ExchangeAdapter for KrakenAdapter {
     fn parse_message(&self, text: &str) -> Result<ExchangeMessage> {
         let msg: serde_json::Value = serde_json::from_str(text)?;
 
-        // Kraken uses different message formats
-        if let Some(event) = msg.get("event") {
-            let event_str = event.as_str().unwrap_or("");
-            match event_str {
-                "heartbeat" => return Ok(ExchangeMessage::Heartbeat),
-                "systemStatus" | "subscriptionStatus" => return Ok(ExchangeMessage::Other),
-                _ => {}
+        // v2: Check for channel field (JSON object format)
+        if let Some(channel) = msg.get("channel").and_then(|c| c.as_str()) {
+            if channel != "book" {
+                return Ok(ExchangeMessage::Other);
             }
-        }
 
-        // Array format: [channelID, data, "book-depth", "PAIR"]
-        if let Some(arr) = msg.as_array() {
-            if arr.len() >= 4 && arr[2].as_str() == Some("book-25") {
-                let symbol = arr[3].as_str().unwrap_or("").replace('/', "");
-                let data = &arr[1];
+            let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let data_arr = msg
+                .get("data")
+                .and_then(|d| d.as_array())
+                .ok_or_else(|| anyhow::anyhow!("Missing data array"))?;
 
-                // Check if snapshot (has both 'as' and 'bs' keys)
-                let has_asks = data.get("as").is_some() || data.get("a").is_some();
-                let has_bids = data.get("bs").is_some() || data.get("b").is_some();
-
-                if has_asks && has_bids {
-                    // Snapshot
-                    let bids = parse_kraken_levels(data.get("bs").or(data.get("b")).unwrap_or(&serde_json::Value::Null))?;
-                    let asks = parse_kraken_levels(data.get("as").or(data.get("a")).unwrap_or(&serde_json::Value::Null))?;
-
-                    return Ok(ExchangeMessage::Snapshot {
-                        symbol,
-                        bids,
-                        asks,
-                        sequence: 0,
-                    });
-                } else {
-                    // Delta update
-                    let bids = if let Some(b) = data.get("b") {
-                        parse_kraken_levels(b)?
-                    } else {
-                        Vec::new()
-                    };
-
-                    let asks = if let Some(a) = data.get("a") {
-                        parse_kraken_levels(a)?
-                    } else {
-                        Vec::new()
-                    };
-
-                    // Use atomic counter for guaranteed monotonic sequence
-                    let sequence = self.sequence_counter.fetch_add(1, Ordering::Relaxed);
-
-                    return Ok(ExchangeMessage::Delta {
-                        symbol,
-                        bids,
-                        asks,
-                        sequence,
-                    });
-                }
+            if data_arr.is_empty() {
+                return Ok(ExchangeMessage::Other);
             }
-        }
 
-        Ok(ExchangeMessage::Other)
+            let data = &data_arr[0];
+            let symbol = data
+                .get("symbol")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Missing symbol"))?
+                .to_string();
+
+            let parse_level = |level: &serde_json::Value| -> Result<[f64; 2]> {
+                let price = level
+                    .get("price")
+                    .and_then(|p| p.as_f64())
+                    .ok_or_else(|| anyhow::anyhow!("Missing price"))?;
+                let qty = level
+                    .get("qty")
+                    .and_then(|q| q.as_f64())
+                    .ok_or_else(|| anyhow::anyhow!("Missing qty"))?;
+                Ok([price, qty])
+            };
+
+            let bids = if let Some(b) = data.get("bids").and_then(|b| b.as_array()) {
+                b.iter().map(parse_level).collect::<Result<Vec<_>>>()?
+            } else {
+                Vec::new()
+            };
+
+            let asks = if let Some(a) = data.get("asks").and_then(|a| a.as_array()) {
+                a.iter().map(parse_level).collect::<Result<Vec<_>>>()?
+            } else {
+                Vec::new()
+            };
+
+            let sequence = self.sequence_counter.fetch_add(1, Ordering::Relaxed);
+
+            match msg_type {
+                "snapshot" => Ok(ExchangeMessage::Snapshot {
+                    symbol,
+                    bids,
+                    asks,
+                    sequence,
+                }),
+                "update" => Ok(ExchangeMessage::Delta {
+                    symbol,
+                    bids,
+                    asks,
+                    sequence,
+                }),
+                _ => Ok(ExchangeMessage::Other),
+            }
+        } else {
+            // Not a v2 message
+            Ok(ExchangeMessage::Other)
+        }
     }
 
     async fn fetch_snapshot(&self, symbol: &str) -> Result<SnapshotData> {
         let url = format!("{}/Depth?pair={}&count=25", self.rest_url, symbol);
-        let response = reqwest::get(&url).await?.json::<serde_json::Value>().await?;
+        let response = reqwest::get(&url)
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
 
         // Kraken REST response format: {"error":[], "result": {"XXBTZUSD": {...}}}
         let result = response["result"]
@@ -428,10 +569,14 @@ impl ExchangeAdapter for KrakenAdapter {
 }
 
 fn parse_kraken_levels(value: &serde_json::Value) -> Result<Vec<[f64; 2]>> {
-    let arr = value.as_array().ok_or_else(|| anyhow::anyhow!("Expected array"))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Expected array"))?;
     let mut levels = Vec::new();
     for item in arr {
-        let inner = item.as_array().ok_or_else(|| anyhow::anyhow!("Expected inner array"))?;
+        let inner = item
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Expected inner array"))?;
         if inner.len() >= 2 {
             let price = inner[0].as_str().unwrap_or("0").parse::<f64>()?;
             let qty = inner[1].as_str().unwrap_or("0").parse::<f64>()?;
@@ -441,12 +586,194 @@ fn parse_kraken_levels(value: &serde_json::Value) -> Result<Vec<[f64; 2]>> {
     Ok(levels)
 }
 
+// ============================================================================
+// Binance Adapter
+// ============================================================================
+
+pub struct BinanceAdapter {
+    rest_url: String,
+    sequence_counter: AtomicU64,
+}
+
+impl BinanceAdapter {
+    pub fn new(rest_url: String) -> Self {
+        Self {
+            rest_url,
+            sequence_counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Normalize symbol: BTC/USD -> BTCUSDT, BTC/USDT -> BTCUSDT
+    fn normalize_symbol(symbol: &str) -> String {
+        let normalized = symbol.replace('/', "").to_uppercase();
+        // Replace USD with USDT if not already USDT
+        if normalized.ends_with("USD") && !normalized.ends_with("USDT") {
+            normalized.replace("USD", "USDT")
+        } else {
+            normalized
+        }
+    }
+
+    /// Denormalize symbol: BTCUSDT -> BTC/USD
+    fn denormalize_symbol(symbol: &str) -> String {
+        if let Some(base) = symbol.strip_suffix("USDT") {
+            format!("{}/USD", base)
+        } else if let Some(base) = symbol.strip_suffix("BTC") {
+            format!("{}/BTC", base)
+        } else if let Some(base) = symbol.strip_suffix("ETH") {
+            format!("{}/ETH", base)
+        } else if let Some(base) = symbol.strip_suffix("BNB") {
+            format!("{}/BNB", base)
+        } else {
+            // Fallback: assume first 3 chars are base
+            if symbol.len() > 3 {
+                format!("{}/{}", &symbol[..3], &symbol[3..])
+            } else {
+                symbol.to_string()
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ExchangeAdapter for BinanceAdapter {
+    fn exchange_name(&self) -> &str {
+        "binance"
+    }
+
+    fn build_subscribe_message(&self, symbols: &[String]) -> String {
+        // Binance WebSocket combines streams: <symbol1>@depth@100ms/<symbol2>@depth@100ms
+        let streams: Vec<String> = symbols
+            .iter()
+            .map(|sym| {
+                let normalized = Self::normalize_symbol(sym).to_lowercase();
+                format!("{}@depth@100ms", normalized)
+            })
+            .collect();
+
+        serde_json::json!({
+            "method": "SUBSCRIBE",
+            "params": streams,
+            "id": 1
+        })
+        .to_string()
+    }
+
+    fn parse_message(&self, text: &str) -> Result<ExchangeMessage> {
+        let msg: serde_json::Value = serde_json::from_str(text)?;
+
+        // Check for depth update event
+        if msg.get("e").and_then(|e| e.as_str()) != Some("depthUpdate") {
+            return Ok(ExchangeMessage::Other);
+        }
+
+        let symbol_raw = msg
+            .get("s")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing symbol"))?;
+
+        let symbol = Self::denormalize_symbol(symbol_raw);
+
+        // Parse bids and asks
+        let bids = msg
+            .get("b")
+            .and_then(|b| b.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing bids"))?;
+
+        let asks = msg
+            .get("a")
+            .and_then(|a| a.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing asks"))?;
+
+        let parse_level = |level: &serde_json::Value| -> Result<[f64; 2]> {
+            let arr = level
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Expected array"))?;
+            if arr.len() < 2 {
+                return Err(anyhow::anyhow!("Invalid level format"));
+            }
+            let price = arr[0].as_str().unwrap_or("0").parse::<f64>()?;
+            let qty = arr[1].as_str().unwrap_or("0").parse::<f64>()?;
+            Ok([price, qty])
+        };
+
+        let bids_parsed: Result<Vec<_>> = bids.iter().map(parse_level).collect();
+        let asks_parsed: Result<Vec<_>> = asks.iter().map(parse_level).collect();
+
+        // Use final update ID as sequence
+        let sequence = msg
+            .get("u")
+            .and_then(|u| u.as_u64())
+            .unwrap_or_else(|| self.sequence_counter.fetch_add(1, Ordering::Relaxed));
+
+        Ok(ExchangeMessage::Delta {
+            symbol,
+            bids: bids_parsed?,
+            asks: asks_parsed?,
+            sequence,
+        })
+    }
+
+    async fn fetch_snapshot(&self, symbol: &str) -> Result<SnapshotData> {
+        let normalized = Self::normalize_symbol(symbol);
+        let url = format!(
+            "{}/api/v3/depth?symbol={}&limit=50",
+            self.rest_url, normalized
+        );
+
+        let response = reqwest::get(&url).await?;
+        let data: serde_json::Value = response.json().await?;
+
+        let last_update_id = data
+            .get("lastUpdateId")
+            .and_then(|id| id.as_u64())
+            .unwrap_or(0);
+
+        let bids = data
+            .get("bids")
+            .and_then(|b| b.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing bids"))?;
+
+        let asks = data
+            .get("asks")
+            .and_then(|a| a.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing asks"))?;
+
+        let parse_level = |level: &serde_json::Value| -> Result<[f64; 2]> {
+            let arr = level
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Expected array"))?;
+            if arr.len() < 2 {
+                return Err(anyhow::anyhow!("Invalid level format"));
+            }
+            let price = arr[0].as_str().unwrap_or("0").parse::<f64>()?;
+            let qty = arr[1].as_str().unwrap_or("0").parse::<f64>()?;
+            Ok([price, qty])
+        };
+
+        let bids_parsed: Result<Vec<_>> = bids.iter().map(parse_level).collect();
+        let asks_parsed: Result<Vec<_>> = asks.iter().map(parse_level).collect();
+
+        Ok(SnapshotData {
+            symbol: symbol.to_string(),
+            bids: bids_parsed?,
+            asks: asks_parsed?,
+            sequence: last_update_id,
+        })
+    }
+}
+
 /// Create adapter for exchange
-pub fn create_adapter(exchange_name: &str, _ws_url: &str, rest_url: &str) -> Result<Box<dyn ExchangeAdapter>> {
+pub fn create_adapter(
+    exchange_name: &str,
+    _ws_url: &str,
+    rest_url: &str,
+) -> Result<Box<dyn ExchangeAdapter>> {
     match exchange_name.to_lowercase().as_str() {
         "bitstamp" => Ok(Box::new(BitstampAdapter::new(rest_url.to_string()))),
         "coinbase" => Ok(Box::new(CoinbaseAdapter::new(rest_url.to_string()))),
         "kraken" => Ok(Box::new(KrakenAdapter::new(rest_url.to_string()))),
+        "binance" => Ok(Box::new(BinanceAdapter::new(rest_url.to_string()))),
         _ => Err(anyhow::anyhow!("Unknown exchange: {}", exchange_name)),
     }
 }
@@ -472,13 +799,61 @@ mod tests {
         let msg = adapter.parse_message(json).unwrap();
 
         match msg {
-            ExchangeMessage::Delta { symbol, bids, asks, .. } => {
+            ExchangeMessage::Delta {
+                symbol, bids, asks, ..
+            } => {
                 assert_eq!(symbol, "BTCUSD");
                 assert_eq!(bids.len(), 1);
                 assert_eq!(asks.len(), 1);
             }
             _ => panic!("Expected Delta message"),
         }
+    }
+
+    #[test]
+    fn test_binance_parse_delta() {
+        let json = r#"{
+            "e": "depthUpdate",
+            "E": 1640000000000,
+            "s": "BTCUSDT",
+            "U": 1,
+            "u": 2,
+            "b": [["67000.00", "0.5"]],
+            "a": [["67001.00", "0.3"]]
+        }"#;
+
+        let adapter = BinanceAdapter::new("https://api.binance.com".to_string());
+        let msg = adapter.parse_message(json).unwrap();
+
+        match msg {
+            ExchangeMessage::Delta {
+                symbol,
+                bids,
+                asks,
+                sequence,
+            } => {
+                assert_eq!(symbol, "BTC/USD");
+                assert_eq!(bids.len(), 1);
+                assert_eq!(asks.len(), 1);
+                assert_eq!(sequence, 2);
+                assert_eq!(bids[0][0], 67000.0);
+                assert_eq!(bids[0][1], 0.5);
+            }
+            _ => panic!("Expected Delta message"),
+        }
+    }
+
+    #[test]
+    fn test_binance_symbol_normalization() {
+        assert_eq!(BinanceAdapter::normalize_symbol("BTC/USD"), "BTCUSDT");
+        assert_eq!(BinanceAdapter::normalize_symbol("BTC/USDT"), "BTCUSDT");
+        assert_eq!(BinanceAdapter::normalize_symbol("ETH/USD"), "ETHUSDT");
+    }
+
+    #[test]
+    fn test_binance_symbol_denormalization() {
+        assert_eq!(BinanceAdapter::denormalize_symbol("BTCUSDT"), "BTC/USD");
+        assert_eq!(BinanceAdapter::denormalize_symbol("ETHUSDT"), "ETH/USD");
     }
 
     #[test]
@@ -494,7 +869,9 @@ mod tests {
         let msg = adapter.parse_message(json).unwrap();
 
         match msg {
-            ExchangeMessage::Snapshot { symbol, bids, asks, .. } => {
+            ExchangeMessage::Snapshot {
+                symbol, bids, asks, ..
+            } => {
                 assert_eq!(symbol, "BTC-USD");
                 assert_eq!(bids.len(), 1);
                 assert_eq!(asks.len(), 1);
@@ -519,7 +896,9 @@ mod tests {
         let msg = adapter.parse_message(json).unwrap();
 
         match msg {
-            ExchangeMessage::Delta { symbol, bids, asks, .. } => {
+            ExchangeMessage::Delta {
+                symbol, bids, asks, ..
+            } => {
                 assert_eq!(symbol, "BTC-USD");
                 assert_eq!(bids.len(), 1);
                 assert_eq!(asks.len(), 1);
@@ -530,13 +909,296 @@ mod tests {
 
     #[test]
     fn test_create_adapter() {
-        let adapter = create_adapter("bitstamp", "wss://ws.bitstamp.net", "https://www.bitstamp.net/api/v2").unwrap();
+        let adapter = create_adapter(
+            "bitstamp",
+            "wss://ws.bitstamp.net",
+            "https://www.bitstamp.net/api/v2",
+        )
+        .unwrap();
         assert_eq!(adapter.exchange_name(), "bitstamp");
 
-        let adapter = create_adapter("coinbase", "wss://ws-feed.exchange.coinbase.com", "https://api.exchange.coinbase.com").unwrap();
+        let adapter = create_adapter(
+            "binance",
+            "wss://stream.binance.com:9443/ws",
+            "https://api.binance.com",
+        )
+        .unwrap();
+        assert_eq!(adapter.exchange_name(), "binance");
+
+        let adapter = create_adapter(
+            "coinbase",
+            "wss://ws-feed.exchange.coinbase.com",
+            "https://api.exchange.coinbase.com",
+        )
+        .unwrap();
         assert_eq!(adapter.exchange_name(), "coinbase");
 
-        let adapter = create_adapter("kraken", "wss://ws.kraken.com", "https://api.kraken.com/0/public").unwrap();
+        let adapter = create_adapter(
+            "kraken",
+            "wss://ws.kraken.com",
+            "https://api.kraken.com/0/public",
+        )
+        .unwrap();
         assert_eq!(adapter.exchange_name(), "kraken");
+    }
+
+    // === Additional Binance Tests ===
+
+    #[test]
+    fn test_binance_depth_parse_multiple_levels() {
+        let json = r#"{
+            "e": "depthUpdate",
+            "E": 1640000000000,
+            "s": "BTCUSDT",
+            "U": 100,
+            "u": 105,
+            "b": [
+                ["67000.00", "0.5"],
+                ["66999.00", "1.0"],
+                ["66998.00", "2.0"]
+            ],
+            "a": [
+                ["67001.00", "0.3"],
+                ["67002.00", "0.7"]
+            ]
+        }"#;
+
+        let adapter = BinanceAdapter::new("https://api.binance.com".to_string());
+        let msg = adapter.parse_message(json).unwrap();
+
+        match msg {
+            ExchangeMessage::Delta {
+                symbol,
+                bids,
+                asks,
+                sequence,
+            } => {
+                assert_eq!(symbol, "BTC/USD");
+                assert_eq!(bids.len(), 3);
+                assert_eq!(asks.len(), 2);
+                assert_eq!(sequence, 105);
+                assert_eq!(bids[1][0], 66999.0);
+                assert_eq!(bids[1][1], 1.0);
+            }
+            _ => panic!("Expected Delta message"),
+        }
+    }
+
+    #[test]
+    fn test_binance_parse_heartbeat() {
+        // Binance doesn't have explicit heartbeat messages, but test other message types
+        let json = r#"{"result":null,"id":1}"#;
+        let adapter = BinanceAdapter::new("https://api.binance.com".to_string());
+        let msg = adapter.parse_message(json).unwrap();
+        assert!(matches!(msg, ExchangeMessage::Other));
+    }
+
+    // === Additional Coinbase Advanced Trade Tests ===
+
+    #[test]
+    fn test_coinbase_advanced_orderbook() {
+        let adapter = CoinbaseAdapter {
+            rest_url: "https://api.exchange.coinbase.com".to_string(),
+            use_advanced: true,
+        };
+
+        let json = r#"{
+            "channel": "l2_data",
+            "sequence_num": 42,
+            "events": [{
+                "type": "snapshot",
+                "product_id": "BTC-USD",
+                "updates": [
+                    {"side": "bid", "price_level": "67000.00", "new_quantity": "0.5"},
+                    {"side": "bid", "price_level": "66999.00", "new_quantity": "1.0"},
+                    {"side": "offer", "price_level": "67001.00", "new_quantity": "0.3"},
+                    {"side": "offer", "price_level": "67002.00", "new_quantity": "0.7"}
+                ]
+            }]
+        }"#;
+
+        let msg = adapter.parse_message(json).unwrap();
+
+        match msg {
+            ExchangeMessage::Snapshot {
+                symbol,
+                bids,
+                asks,
+                sequence,
+            } => {
+                assert_eq!(symbol, "BTC-USD");
+                assert_eq!(bids.len(), 2);
+                assert_eq!(asks.len(), 2);
+                assert_eq!(sequence, 0);
+                assert_eq!(bids[0][0], 67000.0);
+                assert_eq!(bids[0][1], 0.5);
+            }
+            _ => panic!("Expected Snapshot message"),
+        }
+    }
+
+    #[test]
+    fn test_coinbase_advanced_orderbook_update_uses_sequence_num() {
+        let adapter = CoinbaseAdapter {
+            rest_url: "https://api.exchange.coinbase.com".to_string(),
+            use_advanced: true,
+        };
+
+        let json = r#"{
+            "channel": "level2",
+            "sequence_num": 31415,
+            "events": [{
+                "type": "update",
+                "product_id": "BTC-USD",
+                "updates": [
+                    {"side": "bid", "price_level": "67000.00", "new_quantity": "0.8"},
+                    {"side": "offer", "price_level": "67001.00", "new_quantity": "0.0"}
+                ]
+            }]
+        }"#;
+
+        let msg = adapter.parse_message(json).unwrap();
+
+        match msg {
+            ExchangeMessage::Delta {
+                symbol,
+                bids,
+                asks,
+                sequence,
+            } => {
+                assert_eq!(symbol, "BTC-USD");
+                assert_eq!(bids.len(), 1);
+                assert_eq!(asks.len(), 1);
+                assert_eq!(sequence, 31415);
+                assert_eq!(bids[0], [67000.0, 0.8]);
+                assert_eq!(asks[0], [67001.0, 0.0]);
+            }
+            _ => panic!("Expected Delta message"),
+        }
+    }
+
+    #[test]
+    fn test_coinbase_advanced_subscribe_message() {
+        let adapter = CoinbaseAdapter {
+            rest_url: "https://api.exchange.coinbase.com".to_string(),
+            use_advanced: true,
+        };
+        let msg = adapter.build_subscribe_message(&["BTC-USD".to_string()]);
+
+        assert!(msg.contains("\"channel\":\"level2\""));
+        assert!(msg.contains("\"product_ids\":[\"BTC-USD\"]"));
+        assert!(!msg.contains("\"channels\""));
+    }
+
+    #[test]
+    fn test_coinbase_heartbeat() {
+        let json = r#"{"type": "heartbeat", "sequence": 123}"#;
+        let adapter = CoinbaseAdapter::new("https://api.exchange.coinbase.com".to_string());
+        let msg = adapter.parse_message(json).unwrap();
+        assert!(matches!(msg, ExchangeMessage::Heartbeat));
+    }
+
+    // === Snapshot Application Tests ===
+
+    #[test]
+    fn test_snapshot_application() {
+        // Test that snapshot correctly initializes orderbook state
+        let snapshot = SnapshotData {
+            symbol: "BTC/USD".to_string(),
+            bids: vec![[67000.0, 0.5], [66999.0, 1.0]],
+            asks: vec![[67001.0, 0.3], [67002.0, 0.7]],
+            sequence: 100,
+        };
+
+        assert_eq!(snapshot.bids.len(), 2);
+        assert_eq!(snapshot.asks.len(), 2);
+        assert_eq!(snapshot.sequence, 100);
+    }
+
+    #[test]
+    fn test_delta_application() {
+        // Test that delta correctly updates existing snapshot
+        let delta = ExchangeMessage::Delta {
+            symbol: "BTC/USD".to_string(),
+            bids: vec![[67000.0, 0.8]], // Updated quantity
+            asks: vec![[67003.0, 0.5]], // New level
+            sequence: 101,
+        };
+
+        match delta {
+            ExchangeMessage::Delta {
+                bids,
+                asks,
+                sequence,
+                ..
+            } => {
+                assert_eq!(bids.len(), 1);
+                assert_eq!(asks.len(), 1);
+                assert_eq!(sequence, 101);
+                assert_eq!(bids[0][1], 0.8);
+            }
+            _ => panic!("Expected Delta"),
+        }
+    }
+
+    // === Kraken v2 Format Tests ===
+
+    #[test]
+    fn test_kraken_v2_snapshot() {
+        let json = r#"{
+            "channel": "book",
+            "type": "snapshot",
+            "data": [{
+                "symbol": "BTC/USD",
+                "bids": [{"price": 67000.0, "qty": 0.5}],
+                "asks": [{"price": 67001.0, "qty": 0.3}],
+                "checksum": 123456
+            }]
+        }"#;
+
+        let adapter = KrakenAdapter::new("https://api.kraken.com/0/public".to_string());
+        let msg = adapter.parse_message(json).unwrap();
+
+        match msg {
+            ExchangeMessage::Snapshot {
+                symbol, bids, asks, ..
+            } => {
+                assert_eq!(symbol, "BTC/USD");
+                assert_eq!(bids.len(), 1);
+                assert_eq!(asks.len(), 1);
+                assert_eq!(bids[0][0], 67000.0);
+            }
+            _ => panic!("Expected Snapshot message"),
+        }
+    }
+
+    #[test]
+    fn test_kraken_v2_update() {
+        let json = r#"{
+            "channel": "book",
+            "type": "update",
+            "data": [{
+                "symbol": "BTC/USD",
+                "bids": [{"price": 67000.0, "qty": 0.8}],
+                "asks": [{"price": 67001.0, "qty": 0.0}],
+                "checksum": 123457
+            }]
+        }"#;
+
+        let adapter = KrakenAdapter::new("https://api.kraken.com/0/public".to_string());
+        let msg = adapter.parse_message(json).unwrap();
+
+        match msg {
+            ExchangeMessage::Delta {
+                symbol, bids, asks, ..
+            } => {
+                assert_eq!(symbol, "BTC/USD");
+                assert_eq!(bids.len(), 1);
+                assert_eq!(asks.len(), 1);
+                // qty=0.0 means remove the level
+                assert_eq!(asks[0][1], 0.0);
+            }
+            _ => panic!("Expected Delta message"),
+        }
     }
 }

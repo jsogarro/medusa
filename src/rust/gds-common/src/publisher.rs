@@ -70,7 +70,10 @@ impl KdbPublisher {
             mid = mid,
         );
 
-        debug!("Publishing orderbook: {} {} seq={}", exchange, sym, sequence);
+        debug!(
+            "Publishing orderbook: {} {} seq={}",
+            exchange, sym, sequence
+        );
         self.send_async_query(&query).await
     }
 

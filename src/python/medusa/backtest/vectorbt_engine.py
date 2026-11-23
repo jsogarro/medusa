@@ -21,17 +21,79 @@ class VectorBTEngine:
         initial_capital: float | None = None,
         commission: float | None = None,
         slippage: float | None = None,
+        asset_class: str = "crypto",
     ) -> None:
         config = get_settings().backtest
-        self.initial_capital = initial_capital if initial_capital is not None else config.initial_capital
-        self.commission = commission if commission is not None else config.commission
-        self.slippage = slippage if slippage is not None else config.slippage
+        self.initial_capital = (
+            initial_capital if initial_capital is not None else config.initial_capital
+        )
+        self.asset_class = asset_class
+
+        # Asset-class specific defaults
+        if asset_class == "equity":
+            # Alpaca: $0 commission for stocks
+            self.commission = 0.0
+            # Equity slippage model: ~2 basis points
+            self.slippage = slippage if slippage is not None else 0.0002
+        else:
+            # Crypto default
+            self.commission = commission if commission is not None else config.commission
+            self.slippage = slippage if slippage is not None else config.slippage
+
+    def _filter_market_hours(
+        self,
+        signals: pd.Series | pd.DataFrame,
+        extended_hours: bool = False,
+    ) -> pd.Series | pd.DataFrame:
+        """Filter signals to only allow trading during market hours (equity only).
+
+        Args:
+            signals: Boolean signals (entries or exits)
+            extended_hours: Allow extended hours trading (4:00-9:30, 16:00-20:00 ET)
+
+        Returns:
+            Filtered signals (masked outside market hours)
+        """
+        if self.asset_class != "equity":
+            # Crypto: 24/7 trading, no filtering
+            return signals
+
+        # Extract time from index (assumes DatetimeIndex)
+        if not isinstance(signals.index, pd.DatetimeIndex):
+            logger.warning("Cannot filter market hours without DatetimeIndex")
+            return signals
+
+        # Convert to ET timezone (US/Eastern)
+        times = (
+            signals.index.tz_convert("US/Eastern").time
+            if signals.index.tz is not None
+            else signals.index.time
+        )
+
+        # Regular market hours: 9:30 - 16:00 ET
+        regular_open = pd.Timestamp("09:30").time()
+        regular_close = pd.Timestamp("16:00").time()
+
+        if extended_hours:
+            # Extended hours: 4:00 - 20:00 ET (includes pre-market and after-hours)
+            extended_open = pd.Timestamp("04:00").time()
+            extended_close = pd.Timestamp("20:00").time()
+            mask = (times >= extended_open) & (times < extended_close)
+        else:
+            # Regular hours only
+            mask = (times >= regular_open) & (times < regular_close)
+
+        # Apply mask (zero out signals outside hours)
+        filtered = signals.copy()
+        filtered[~mask] = False
+        return filtered
 
     def run_signals(
         self,
         price: pd.Series | pd.DataFrame,
         entries: pd.Series | pd.DataFrame,
         exits: pd.Series | pd.DataFrame,
+        extended_hours: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Run backtest from entry/exit boolean signals.
@@ -40,11 +102,17 @@ class VectorBTEngine:
             price: Close price series.
             entries: Boolean entry signals.
             exits: Boolean exit signals.
+            extended_hours: Allow extended hours trading (equity only)
 
         Returns:
             vbt.Portfolio object with results.
         """
         import vectorbt as vbt
+
+        # Filter signals by market hours (equity only)
+        if self.asset_class == "equity":
+            entries = self._filter_market_hours(entries, extended_hours)
+            exits = self._filter_market_hours(exits, extended_hours)
 
         portfolio = vbt.Portfolio.from_signals(
             close=price,
@@ -139,10 +207,7 @@ class VectorBTEngine:
         best_idx = results_df[metric].idxmax()
         best_params = {k: results_df.loc[best_idx, k] for k in param_names}
 
-        logger.info(
-            f"Best params: {best_params} "
-            f"({metric}={results_df.loc[best_idx, metric]:.4f})"
-        )
+        logger.info(f"Best params: {best_params} ({metric}={results_df.loc[best_idx, metric]:.4f})")
         return best_params, results_df
 
     def walk_forward(
@@ -175,22 +240,22 @@ class VectorBTEngine:
             train_price = price.iloc[pos : pos + train_periods]
             test_price = price.iloc[pos + train_periods : pos + train_periods + test_periods]
 
-            best_params, _ = self.optimize_params(
-                train_price, signal_func, param_grid, metric
-            )
+            best_params, _ = self.optimize_params(train_price, signal_func, param_grid, metric)
 
             test_entries, test_exits = signal_func(test_price, **best_params)
             pf = self.run_signals(test_price, test_entries, test_exits)
 
-            results.append({
-                "train_start": train_price.index[0],
-                "train_end": train_price.index[-1],
-                "test_start": test_price.index[0],
-                "test_end": test_price.index[-1],
-                "params": best_params,
-                "test_return": pf.total_return(),
-                "test_sharpe": pf.sharpe_ratio(),
-            })
+            results.append(
+                {
+                    "train_start": train_price.index[0],
+                    "train_end": train_price.index[-1],
+                    "test_start": test_price.index[0],
+                    "test_end": test_price.index[-1],
+                    "params": best_params,
+                    "test_return": pf.total_return(),
+                    "test_sharpe": pf.sharpe_ratio(),
+                }
+            )
             pos += test_periods
 
         return pd.DataFrame(results)

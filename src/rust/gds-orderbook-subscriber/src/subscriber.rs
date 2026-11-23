@@ -18,11 +18,7 @@ pub struct ExchangeSubscriber {
 
 impl ExchangeSubscriber {
     /// Create a new exchange subscriber
-    pub fn new(
-        config: ExchangeConfig,
-        publisher: KdbPublisher,
-        health_timeout: Duration,
-    ) -> Self {
+    pub fn new(config: ExchangeConfig, publisher: KdbPublisher, health_timeout: Duration) -> Self {
         Self {
             config,
             publisher,
@@ -32,10 +28,7 @@ impl ExchangeSubscriber {
 
     /// Run the subscriber (outer reconnect loop)
     pub async fn run(&mut self) -> Result<()> {
-        let mut backoff = ExponentialBackoff::new(
-            Duration::from_secs(1),
-            Duration::from_secs(60),
-        );
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(60));
 
         loop {
             info!("Connecting to {} WebSocket", self.config.name);
@@ -60,8 +53,12 @@ impl ExchangeSubscriber {
     /// Single WebSocket connection lifecycle
     async fn subscribe_loop(&mut self) -> Result<()> {
         // Create exchange adapter
-        let adapter = create_adapter(&self.config.name, &self.config.ws_url, &self.config.rest_url)
-            .with_context(|| format!("Failed to create adapter for {}", self.config.name))?;
+        let adapter = create_adapter(
+            &self.config.name,
+            &self.config.ws_url,
+            &self.config.rest_url,
+        )
+        .with_context(|| format!("Failed to create adapter for {}", self.config.name))?;
 
         // Connect to WebSocket
         let (ws_stream, _) = connect_async(&self.config.ws_url)
@@ -75,7 +72,8 @@ impl ExchangeSubscriber {
         // Bootstrap orderbooks via REST (ONE-TIME snapshot per symbol)
         info!("Bootstrapping orderbooks via REST for {}", self.config.name);
         let mut state = OrderbookState::new();
-        self.bootstrap_orderbooks(adapter.as_ref(), &mut state).await?;
+        self.bootstrap_orderbooks(adapter.as_ref(), &mut state)
+            .await?;
 
         // Subscribe to WebSocket orderbook channels
         for symbol in &self.config.symbols {
@@ -84,7 +82,10 @@ impl ExchangeSubscriber {
                 debug!("Subscribing to {} {}", self.config.name, symbol);
                 write.send(Message::Text(sub_msg)).await?;
             } else {
-                warn!("{} generated empty subscribe message for {}", self.config.name, symbol);
+                warn!(
+                    "{} generated empty subscribe message for {}",
+                    self.config.name, symbol
+                );
             }
         }
 
@@ -99,21 +100,43 @@ impl ExchangeSubscriber {
                     health.reset_timer();
 
                     match adapter.parse_message(&text) {
-                        Ok(ExchangeMessage::Snapshot { symbol, bids, asks, sequence }) => {
-                            debug!("{} snapshot for {}: {} bids, {} asks",
-                                self.config.name, symbol, bids.len(), asks.len());
+                        Ok(ExchangeMessage::Snapshot {
+                            symbol,
+                            bids,
+                            asks,
+                            sequence,
+                        }) => {
+                            debug!(
+                                "{} snapshot for {}: {} bids, {} asks",
+                                self.config.name,
+                                symbol,
+                                bids.len(),
+                                asks.len()
+                            );
                             state.apply_snapshot(&symbol, bids, asks, sequence);
                             self.publish_orderbook(&state, &symbol).await?;
                         }
-                        Ok(ExchangeMessage::Delta { symbol, bids, asks, sequence }) => {
-                            debug!("{} delta for {}: {} bids, {} asks, seq={}",
-                                self.config.name, symbol, bids.len(), asks.len(), sequence);
+                        Ok(ExchangeMessage::Delta {
+                            symbol,
+                            bids,
+                            asks,
+                            sequence,
+                        }) => {
+                            debug!(
+                                "{} delta for {}: {} bids, {} asks, seq={}",
+                                self.config.name,
+                                symbol,
+                                bids.len(),
+                                asks.len(),
+                                sequence
+                            );
 
                             // Apply delta with sequence validation
                             if let Err(e) = state.apply_delta(&symbol, bids, asks, sequence) {
                                 warn!("{} sequence gap for {}: {}", self.config.name, symbol, e);
                                 // Rebootstrap this symbol
-                                self.rebootstrap_symbol(adapter.as_ref(), &mut state, &symbol).await?;
+                                self.rebootstrap_symbol(adapter.as_ref(), &mut state, &symbol)
+                                    .await?;
                             }
 
                             self.publish_orderbook(&state, &symbol).await?;
@@ -154,8 +177,10 @@ impl ExchangeSubscriber {
 
             // Health check
             if health.is_stale() {
-                warn!("{} connection stale (no messages in {:?})",
-                    self.config.name, self.health_timeout);
+                warn!(
+                    "{} connection stale (no messages in {:?})",
+                    self.config.name, self.health_timeout
+                );
                 break;
             }
         }
@@ -172,13 +197,25 @@ impl ExchangeSubscriber {
     ) -> Result<()> {
         let symbols = self.config.symbols.clone();
         for symbol in &symbols {
-            match adapter.fetch_snapshot(symbol).await
-                .with_context(|| format!("Failed to bootstrap {} for {}", symbol, self.config.name)) {
+            match adapter
+                .fetch_snapshot(symbol)
+                .await
+                .with_context(|| format!("Failed to bootstrap {} for {}", symbol, self.config.name))
+            {
                 Ok(snapshot) => {
-                    info!("{} bootstrapped {}: {} bids, {} asks",
-                        self.config.name, snapshot.symbol,
-                        snapshot.bids.len(), snapshot.asks.len());
-                    state.apply_snapshot(&snapshot.symbol, snapshot.bids, snapshot.asks, snapshot.sequence);
+                    info!(
+                        "{} bootstrapped {}: {} bids, {} asks",
+                        self.config.name,
+                        snapshot.symbol,
+                        snapshot.bids.len(),
+                        snapshot.asks.len()
+                    );
+                    state.apply_snapshot(
+                        &snapshot.symbol,
+                        snapshot.bids,
+                        snapshot.asks,
+                        snapshot.sequence,
+                    );
                     self.publish_orderbook(state, &snapshot.symbol).await?;
                 }
                 Err(e) => {
@@ -198,9 +235,15 @@ impl ExchangeSubscriber {
         symbol: &str,
     ) -> Result<()> {
         info!("{} rebootstrapping {}", self.config.name, symbol);
-        let snapshot = adapter.fetch_snapshot(symbol).await
-            .with_context(|| format!("Failed to rebootstrap {} for {}", symbol, self.config.name))?;
-        state.apply_snapshot(&snapshot.symbol, snapshot.bids, snapshot.asks, snapshot.sequence);
+        let snapshot = adapter.fetch_snapshot(symbol).await.with_context(|| {
+            format!("Failed to rebootstrap {} for {}", symbol, self.config.name)
+        })?;
+        state.apply_snapshot(
+            &snapshot.symbol,
+            snapshot.bids,
+            snapshot.asks,
+            snapshot.sequence,
+        );
         self.publish_orderbook(state, &snapshot.symbol).await?;
         Ok(())
     }
@@ -208,8 +251,15 @@ impl ExchangeSubscriber {
     /// Publish orderbook to Tickerplant
     async fn publish_orderbook(&mut self, state: &OrderbookState, symbol: &str) -> Result<()> {
         if let Some(ob) = state.get_snapshot(symbol, &self.config.name, 25) {
-            self.publisher.publish_orderbook(&ob).await
-                .with_context(|| format!("Failed to publish {} {} orderbook to Tickerplant", self.config.name, symbol))?;
+            self.publisher
+                .publish_orderbook(&ob)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to publish {} {} orderbook to Tickerplant",
+                        self.config.name, symbol
+                    )
+                })?;
         }
         Ok(())
     }

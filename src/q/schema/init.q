@@ -7,11 +7,11 @@
 // LOGGING UTILITIES
 // ============================================================================
 
-log:{[level; msg]
+set[`.qg.log;{[level; msg]
   timestamp:.z.p;
   logMsg:string[timestamp]," [",string[level],"] ",msg;
   -1 logMsg;
- };
+ }];
 
 logInfo:{.qg.log[`INFO; x]};
 logWarn:{.qg.log[`WARN; x]};
@@ -21,36 +21,34 @@ logError:{.qg.log[`ERROR; x]};
 // SCHEMA LOADING
 // ============================================================================
 
+/ Load all schema files at top-level so single-colon definitions bind in .qg.
+\l src/q/schema/types.q
+\l src/q/schema/exchange.q
+\l src/q/schema/order.q
+\l src/q/schema/trade.q
+\l src/q/schema/transaction.q
+\l src/q/schema/metadata.q
+\l src/q/schema/equity.q
+\l src/q/schema/options.q
+
 // Load all schema files in correct dependency order
 loadAllSchemas:{[]
-  .qg.logInfo["Loading schema files..."];
-
-  / Load types first (no dependencies)
-  \l schema/types.q
-  .qg.logInfo["Loaded types.q"];
-
-  / Load table schemas (depend on types)
-  \l schema/exchange.q
-  .qg.logInfo["Loaded exchange.q"];
-
-  \l schema/order.q
-  .qg.logInfo["Loaded order.q"];
-
-  \l schema/trade.q
-  .qg.logInfo["Loaded trade.q"];
-
-  \l schema/transaction.q
-  .qg.logInfo["Loaded transaction.q"];
-
-  \l schema/metadata.q
-  .qg.logInfo["Loaded metadata.q"];
-
+  .qg.logInfo["Schema files already loaded"];
   .qg.logInfo["All schema files loaded successfully"];
  };
 
 // ============================================================================
 // TABLE INITIALIZATION
 // ============================================================================
+
+publishTable:{[tableName]
+  tableSym:`$".qg.",string tableName;
+  if[tableName in system "a .qg"; set[tableName; value tableSym]];
+ };
+
+publishTables:{[]
+  .qg.publishTable each `exchange`balance`position`target`order`trade`transaction`datum`flag;
+ };
 
 // Initialize all tables
 initAllTables:{[]
@@ -72,6 +70,7 @@ initAllTables:{[]
   .qg.initMetadataTables[];
   .qg.logInfo["Metadata tables initialized: datum, flag"];
 
+  .qg.publishTables[];
   .qg.logInfo["All tables initialized successfully"];
  };
 
@@ -85,7 +84,7 @@ validateSchema:{[]
 
   / Check all expected tables exist
   expectedTables:`exchange`balance`position`target`order`trade`transaction`datum`flag;
-  existingTables:tables[];
+  existingTables:tables `.;
 
   missingTables:expectedTables except existingTables;
 
@@ -97,7 +96,7 @@ validateSchema:{[]
   .qg.logInfo["Available tables: ", " " sv string expectedTables];
 
   / Return table metadata
-  ([] table:expectedTables; count:{count value x} each expectedTables)
+  ([] table:expectedTables; rowCount:{count value x} each expectedTables)
  };
 
 // ============================================================================
@@ -109,9 +108,9 @@ getSchemaStats:{[]
   .qg.logInfo["Gathering schema statistics..."];
 
   stats:([]
-    table:tables[];
-    rowCount:{count value x} each tables[];
-    columnCount:{count cols value x} each tables[]
+    table:tables `.;
+    rowCount:{count value x} each tables `.;
+    columnCount:{count cols value x} each tables `.
   );
 
   stats

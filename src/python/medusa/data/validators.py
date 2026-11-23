@@ -2,12 +2,37 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pandas as pd
 from loguru import logger
 
 REQUIRED_OHLCV = ["open", "high", "low", "close", "volume"]
+
+
+def validate_symbol(symbol: str) -> None:
+    """Validate symbol format.
+
+    Args:
+        symbol: Trading symbol (e.g., BTCUSD, AAPL).
+
+    Raises:
+        ValueError: If symbol format is invalid.
+
+    Rules:
+        - Must be uppercase alphanumeric
+        - Length between 1-20 characters
+        - Cannot start with digit
+    """
+    if not symbol:
+        raise ValueError("Invalid symbol format: symbol cannot be empty")
+
+    if not re.match(r"^[A-Z][A-Z0-9]{0,19}$", symbol):
+        raise ValueError(
+            f"Invalid symbol format: '{symbol}' must be uppercase alphanumeric, "
+            "1-20 characters, cannot start with digit"
+        )
 
 
 def validate_ohlcv(df: pd.DataFrame) -> None:

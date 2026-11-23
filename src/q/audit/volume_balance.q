@@ -1,18 +1,15 @@
 / ============================================================================
 / volume_balance.q - Volume (Crypto) Balance Audit
 / ============================================================================
-/
-/ Verifies that crypto asset balances on the exchange match the calculated
+/ // Verifies that crypto asset balances on the exchange match the calculated
 / balance from the ledger/transaction history. Discrepancies indicate
 / missing transactions or incorrect ledger entries.
-/
-/ Dependencies:
+/ // Dependencies:
 /   - audit.q (core infrastructure)
 /   - lib/money.q (.money.new, .money.validCurrency)
 /   - exchange/coordinator.q (.exchange.coordinator.getBalances)
 /   - schema/exchange.q (.qg.balance table)
-/
-/ Usage:
+/ // Usage:
 /   .audit.VOLUME_BALANCE.validate[]
 /   .audit.run[`VOLUME_BALANCE_AUDIT]
 / ============================================================================

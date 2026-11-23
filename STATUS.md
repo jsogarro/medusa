@@ -13,7 +13,7 @@ Last updated: 2026-04-05
 | 6 | Market making library + Production strategies | COMPLETE | 2026-03-31 |
 | 7 | GDS subscribers (orderbook, trade, auditor) | COMPLETE | 2026-03-31 |
 | 8 | Python research & backtesting framework | COMPLETE | 2026-04-05 |
-| 9 | Risk management (q) | PLANNED | — |
+| 9 | Risk management (q) | COMPLETE | 2026-04-08 |
 | 10 | Production deployment + monitoring | PLANNED | — |
 
 ## Test Coverage

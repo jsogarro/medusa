@@ -62,7 +62,7 @@ mode.guard:{[m;fn;args]
   / Check if current mode matches required mode
   if[not mode.current~m;
     -1"[MODE] Function requires mode: ",string[m],", current mode: ",string mode.current;
-    :(::);
+    :();
   ];
 
   / Execute function with args

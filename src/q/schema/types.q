@@ -27,15 +27,15 @@ NULL_SYMBOL:`;
 // Convert float to fixed-precision long
 // Usage: .qg.toFixed[123.456789; .qg.PRICE_PRECISION]
 // Returns: 123456789j (long)
-toFixed:{[value; precision]
-  "j"$value * precision
+toFixed:{[v; p]
+  "j"$v * p
  };
 
 // Convert fixed-precision long to float
 // Usage: .qg.fromFixed[123456789j; .qg.PRICE_PRECISION]
 // Returns: 123.456789
-fromFixed:{[value; precision]
-  value % precision
+fromFixed:{[v; p]
+  v % (0.0 + p)
  };
 
 // Convert price float to fixed long
@@ -73,7 +73,7 @@ TRADE_TYPE:`buy`sell;
 CURRENCIES:`USD`EUR`GBP`BTC`ETH`USDT`USDC`SOL`DOGE`XRP`ADA`DOT`AVAX`MATIC;
 
 // Exchange names (extend as needed)
-EXCHANGES:`coinbase`kraken`binance`bitstamp`gemini`ftx`okx`bybit`huobi;
+EXCHANGES:`coinbase`kraken`binance`bitstamp`gemini`ftx`okx`bybit`huobi`alpaca;
 
 // ============================================================================
 // VALIDATION FUNCTIONS
@@ -99,6 +99,41 @@ isPositiveAmount:{x > 0j};
 
 // Validate price (must be positive)
 isValidPrice:{x > 0j};
+
+// Validate equity symbol (1-5 uppercase letters)
+isValidEquitySymbol:{[sym]
+  / Null check
+  if[null sym; :0b];
+  if[sym=`; :0b];
+
+  / Convert to string and check format
+  s:string sym;
+  len:count s;
+
+  / Length check (1-5 characters for US equities)
+  if[(len < 1) or (len > 5); :0b];
+
+  / All uppercase letters check
+  all s in .Q.A
+ };
+
+// Check if symbol is equity (vs crypto)
+isEquity:{[sym]
+  isValidEquitySymbol[sym]
+ };
+
+// Check if symbol is crypto (vs equity)
+// Crypto pairs are 6-8 characters (e.g., BTCUSD, ETHUSD)
+isCrypto:{[sym]
+  / Null check
+  if[null sym; :0b];
+  if[sym=`; :0b];
+
+  / Crypto pairs are 6-8 characters
+  s:string sym;
+  len:count s;
+  (len >= 6) and (len <= 8) and all s in .Q.A
+ };
 
 // ============================================================================
 // ID GENERATOR (AUTO-INCREMENT SEQUENCES)

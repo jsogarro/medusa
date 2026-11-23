@@ -1,18 +1,15 @@
 / ============================================================================
 / audit.q - Core Audit Infrastructure
 / ============================================================================
-/
-/ Provides:
+/ // Provides:
 /   - Audit type registry (table-driven audit definitions)
 /   - Standardized audit result schema
 /   - Core execution functions (run single, run all)
 /   - Audit history persistence and querying
 /   - Statistics and reporting (latest results, failure rates)
-/
-/ Dependencies:
+/ // Dependencies:
 /   - None (foundation module — audit implementations loaded separately)
-/
-/ Namespaces:
+/ // Namespaces:
 /   .audit        — Core orchestration and result storage
 /   .audit.ORDER  — (loaded from order.q)
 /   .audit.VOLUME_BALANCE — (loaded from volume_balance.q)
@@ -20,8 +17,7 @@
 /   .audit.LEDGER         — (loaded from ledger.q)
 /   .audit.POSITION_CACHE — (loaded from position_cache.q)
 /   .audit.runner         — (loaded from runner.q)
-/
-/ Usage:
+/ // Usage:
 /   .audit.run[`ORDER_AUDIT]       / Execute single audit
 /   .audit.runAll[]                / Execute all enabled audits
 /   .audit.status[]                / Print human-readable status report
@@ -69,10 +65,20 @@ newResult:{[auditType;status;errors;warnings;metrics]
 / Persist a result to the results table and update type registry
 / @param result dict - Result from newResult
 saveResult:{[result]
-  `.audit.results insert `timestamp`auditType`status`duration`errors`warnings`metrics#result;
+  auditResult:result;
+  if[not `duration in key auditResult; auditResult:auditResult,enlist[`duration]!enlist 0Nn];
+  results::results,enlist `timestamp`auditType`status`duration`errors`warnings`metrics!(
+    auditResult`timestamp;
+    auditResult`auditType;
+    auditResult`status;
+    auditResult`duration;
+    auditResult`errors;
+    auditResult`warnings;
+    auditResult`metrics
+  );
   / Update type registry with last run info
   if[result[`auditType] in exec auditType from .audit.types;
-    update lastRun:result`timestamp, lastStatus:result`status from `.audit.types where auditType=result`auditType;
+    types::update lastRun:result`timestamp, lastStatus:result`status from types where auditType=result`auditType;
   ];
  };
 
@@ -99,12 +105,12 @@ run:{[auditType]
 
   / Execute with timing and error handling
   t0:.z.P;
-  result:@[value; validationFunc; {[at;err]
+  result:@[{value[x][]}; validationFunc; {[at;err]
     .audit.newResult[at; `FAIL; enlist "Audit execution failed: ",err; (); ()!()]
   }[auditType]];
 
   / Add duration to result
-  result[`duration]:.z.P - t0;
+  result:result,enlist[`duration]!enlist (.z.P - t0);
 
   / Save and return
   saveResult[result];
@@ -133,7 +139,7 @@ latestResults:{[]
 / @return table - Failure rates by audit type
 failureRate:{[window]
   cutoff:.z.P - window;
-  select totalRuns:count i, failures:sum status=`FAIL, warnings:sum status=`WARNING,
+  0!select totalRuns:count i, failures:"j"$sum status=`FAIL, warnings:"j"$sum status=`WARNING,
     failureRate:(sum status=`FAIL) % count i
     by auditType from .audit.results where timestamp>=cutoff
  };

@@ -1,11 +1,11 @@
 / Configuration Loader with Hierarchical Merging
 
-\d .conf.loader
+\d .conf
 
 / Load environment variables matching pattern
 / prefix: "MEDUSA"
 / section: `strategy
-loadEnvVars:{[prefix;section]
+loader.loadEnvVars:{[prefix;section]
   / Get all environment variables
   envVars:system "env";
 
@@ -21,10 +21,10 @@ loadEnvVars:{[prefix;section]
 
     / Extract key (remove prefix)
     fullKey:first parts;
-    key:`$lower (count pattern)_fullKey;
-    val:last parts;
+    confKey:`$lower (count pattern)_fullKey;
+    confVal:last parts;
 
-    config[key]:val;
+    config[confKey]:confVal;
     config
   }[;pattern]/[config; matching];
 
@@ -33,33 +33,37 @@ loadEnvVars:{[prefix;section]
 
 / Merge two configuration dictionaries
 / override takes precedence
-merge:{[base;override]
-  result:base;
+loader.toDict:{[sectionConfig]
+  sectionKeys:key sectionConfig;
+  sectionValues:value sectionConfig;
+  if[0=count sectionKeys; :()!()];
+  if[0>type sectionValues; sectionValues:enlist sectionValues];
+  sectionKeys!sectionValues
+ };
 
-  / Merge each section in override
-  result:{[result;override;section]
-    if[not section in key result;
-      result[section]:()!()
-    ];
+loader.merge:{[base;override]
+  sections:distinct (key base),key override;
+  if[0=count sections; :()!()];
 
-    / Merge keys within section
-    overrideSection:override[section];
-    result:{[result;section;overrideSection;k]
-      result[section][k]:overrideSection[k];
-      result
-    }[;section;overrideSection]/[result; key overrideSection];
+  configs:{[base;override;section]
+    baseSection:$[section in key base; loader.toDict base section; ()!()];
+    overrideSection:$[section in key override; loader.toDict override section; ()!()];
+    mergedKeys:distinct (key baseSection),key overrideSection;
+    if[0=count mergedKeys; :()!()];
+    mergedVals:{[baseSection;overrideSection;k]
+      $[k in key overrideSection; overrideSection k; baseSection k]
+    }[baseSection;overrideSection] each mergedKeys;
+    mergedKeys!mergedVals
+  }[base;override] each sections;
 
-    result
-  }[;override]/[result; key override];
-
-  result
+  sections!configs
  };
 
 / Load configuration with hierarchy
 / configPath: path to .conf file
 / defaults: default configuration dictionary
 / schema: validation schema (optional, can be null)
-load:{[configPath;defaults;schema]
+loader.load:{[configPath;defaults;schema]
   / Start with defaults
   config:defaults;
 
@@ -69,16 +73,16 @@ load:{[configPath;defaults;schema]
     if[fileExists;
       / File exists, parse it
       fileConfig:.conf.parser.parseFile[configPath];
-      config:merge[config; fileConfig]
+      config:loader.merge[config; fileConfig]
     ]
   ];
 
   / Load environment variable overrides for each section (vectorized)
   sections:key config;
-  envConfigs:{loadEnvVars["MEDUSA"; x]} each sections;
+  envConfigs:{loader.loadEnvVars["MEDUSA"; x]} each sections;
   config:{[config;section;envConfig]
     if[count envConfig;
-      config:merge[config; (enlist section)!(enlist envConfig)]
+      config:loader.merge[config; (enlist section)!(enlist envConfig)]
     ];
     config
   }[;;]/[config; sections; envConfigs];
@@ -100,4 +104,4 @@ load:{[configPath;defaults;schema]
   config
  };
 
-\d .
+\d .conf

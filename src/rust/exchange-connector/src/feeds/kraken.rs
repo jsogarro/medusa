@@ -5,13 +5,13 @@
 use crate::client::ExchangeError;
 use crate::types::{OrderBook, PriceLevel, Side, Trade};
 use crate::websocket::{ReconnectConfig, WebSocketClient, WsConfig, WsMessage};
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
+use serde::Serialize;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-const KRAKEN_WS_URL: &str = "wss://ws.kraken.com";
+const KRAKEN_WS_URL: &str = "wss://ws.kraken.com/v2";
 
 /// Kraken WebSocket feed
 pub struct KrakenFeed {
@@ -40,15 +40,15 @@ impl KrakenFeed {
         // Security: Validate pair format
         if !pair.chars().all(|c| c.is_alphanumeric() || c == '/') {
             return Err(ExchangeError::InvalidRequest(
-                "Pair must contain only alphanumeric characters and slashes".into()
+                "Pair must contain only alphanumeric characters and slashes".into(),
             ));
         }
 
-        let sub_msg = KrakenSubscribe {
-            event: "subscribe".to_string(),
-            pair: vec![pair.to_uppercase()],
-            subscription: KrakenSubscription {
-                name: "book".to_string(),
+        let sub_msg = KrakenSubscribeV2 {
+            method: "subscribe".to_string(),
+            params: KrakenSubscriptionParams {
+                channel: "book".to_string(),
+                symbol: vec![pair.to_uppercase()],
                 depth: Some(10),
             },
         };
@@ -68,15 +68,15 @@ impl KrakenFeed {
         // Security: Validate pair format
         if !pair.chars().all(|c| c.is_alphanumeric() || c == '/') {
             return Err(ExchangeError::InvalidRequest(
-                "Pair must contain only alphanumeric characters and slashes".into()
+                "Pair must contain only alphanumeric characters and slashes".into(),
             ));
         }
 
-        let sub_msg = KrakenSubscribe {
-            event: "subscribe".to_string(),
-            pair: vec![pair.to_uppercase()],
-            subscription: KrakenSubscription {
-                name: "trade".to_string(),
+        let sub_msg = KrakenSubscribeV2 {
+            method: "subscribe".to_string(),
+            params: KrakenSubscriptionParams {
+                channel: "trade".to_string(),
+                symbol: vec![pair.to_uppercase()],
                 depth: None,
             },
         };
@@ -88,60 +88,64 @@ impl KrakenFeed {
         self.client.send_text(&json).await
     }
 
-    /// Parse Kraken orderbook message
+    /// Parse Kraken orderbook message (WebSocket API v2)
     ///
-    /// Kraken sends orderbook updates as arrays: [channelID, data, channelName, pair]
+    /// v2 sends JSON objects: {"channel": "book", "type": "snapshot"|"update", "data": [...]}
     pub fn parse_orderbook(text: &str) -> Result<OrderBook, ExchangeError> {
         let msg: serde_json::Value = serde_json::from_str(text)?;
 
-        // Kraken book messages are arrays
-        let arr = msg
-            .as_array()
-            .ok_or_else(|| ExchangeError::Other("Expected array message".into()))?;
+        // v2 messages are JSON objects with channel field
+        let channel = msg["channel"]
+            .as_str()
+            .ok_or_else(|| ExchangeError::Other("Missing channel field".into()))?;
 
-        if arr.len() < 4 {
-            return Err(ExchangeError::Other("Invalid orderbook message format".into()));
+        if channel != "book" {
+            return Err(ExchangeError::Other("Not a book message".into()));
         }
 
-        // Extract pair from last element
-        let pair = arr[3]
+        // Extract data array
+        let data_arr = msg["data"]
+            .as_array()
+            .ok_or_else(|| ExchangeError::Other("Missing data array".into()))?;
+
+        if data_arr.is_empty() {
+            return Err(ExchangeError::Other("Empty data array".into()));
+        }
+
+        let data = &data_arr[0];
+
+        let symbol = data["symbol"]
             .as_str()
-            .ok_or_else(|| ExchangeError::Other("Missing pair in message".into()))?;
+            .ok_or_else(|| ExchangeError::Other("Missing symbol in data".into()))?;
 
-        // Data is in second element
-        let data = &arr[1];
-        let book_data: KrakenBookData = serde_json::from_value(data.clone())?;
+        let parse_level = |level: &serde_json::Value| -> Result<PriceLevel, ExchangeError> {
+            let price = level["price"]
+                .as_f64()
+                .ok_or_else(|| ExchangeError::Other("Invalid price".into()))?;
+            let qty = level["qty"]
+                .as_f64()
+                .ok_or_else(|| ExchangeError::Other("Invalid qty".into()))?;
 
-        let parse_level = |level: &[serde_json::Value]| -> Result<PriceLevel, ExchangeError> {
-            if level.len() < 2 {
-                return Err(ExchangeError::Other("Invalid price level format".into()));
-            }
             Ok(PriceLevel {
-                price: level[0]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| ExchangeError::Other("Invalid price".into()))?,
-                quantity: level[1]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| ExchangeError::Other("Invalid quantity".into()))?,
+                price,
+                quantity: qty,
             })
         };
 
-        let bids = if let Some(b) = &book_data.b {
-            b.iter().map(|l| parse_level(l)).collect::<Result<Vec<_>, _>>()?
+        let bids = if let Some(b) = data["bids"].as_array() {
+            b.iter().map(parse_level).collect::<Result<Vec<_>, _>>()?
         } else {
             vec![]
         };
 
-        let asks = if let Some(a) = &book_data.a {
-            a.iter().map(|l| parse_level(l)).collect::<Result<Vec<_>, _>>()?
+        let asks = if let Some(a) = data["asks"].as_array() {
+            a.iter().map(parse_level).collect::<Result<Vec<_>, _>>()?
         } else {
             vec![]
         };
 
         Ok(OrderBook {
-            pair: pair.to_string(),
+            pair: symbol.to_string(),
             exchange: "kraken".to_string(),
             bids,
             asks,
@@ -150,67 +154,75 @@ impl KrakenFeed {
         })
     }
 
-    /// Parse Kraken trade message
+    /// Parse Kraken trade message (WebSocket API v2)
+    ///
+    /// v2 sends JSON objects: {"channel": "trade", "type": "update", "data": [...]}
     pub fn parse_trade(text: &str) -> Result<Trade, ExchangeError> {
         let msg: serde_json::Value = serde_json::from_str(text)?;
 
-        let arr = msg
-            .as_array()
-            .ok_or_else(|| ExchangeError::Other("Expected array message".into()))?;
-
-        if arr.len() < 4 {
-            return Err(ExchangeError::Other("Invalid trade message format".into()));
-        }
-
-        let pair = arr[3]
+        let channel = msg["channel"]
             .as_str()
-            .ok_or_else(|| ExchangeError::Other("Missing pair in message".into()))?;
+            .ok_or_else(|| ExchangeError::Other("Missing channel field".into()))?;
 
-        let trades_data = arr[1]
-            .as_array()
-            .ok_or_else(|| ExchangeError::Other("Expected trades array".into()))?;
-
-        if trades_data.is_empty() {
-            return Err(ExchangeError::Other("Empty trades array".into()));
+        if channel != "trade" {
+            return Err(ExchangeError::Other("Not a trade message".into()));
         }
 
-        // Parse first trade
-        let trade_arr = trades_data[0]
+        let data_arr = msg["data"]
             .as_array()
-            .ok_or_else(|| ExchangeError::Other("Invalid trade format".into()))?;
+            .ok_or_else(|| ExchangeError::Other("Missing data array".into()))?;
 
-        if trade_arr.len() < 6 {
-            return Err(ExchangeError::Other("Incomplete trade data".into()));
+        if data_arr.is_empty() {
+            return Err(ExchangeError::Other("Empty data array".into()));
         }
 
-        let price: f64 = trade_arr[0]
+        // Parse first trade from data array
+        let trade_data = &data_arr[0];
+
+        let symbol = trade_data["symbol"]
             .as_str()
-            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| ExchangeError::Other("Missing symbol".into()))?;
+
+        let price = trade_data["price"]
+            .as_f64()
             .ok_or_else(|| ExchangeError::Other("Invalid price".into()))?;
 
-        let quantity: f64 = trade_arr[1]
-            .as_str()
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| ExchangeError::Other("Invalid quantity".into()))?;
-
-        let timestamp_f64 = trade_arr[2]
+        let qty = trade_data["qty"]
             .as_f64()
-            .ok_or_else(|| ExchangeError::Other("Invalid timestamp".into()))?;
+            .ok_or_else(|| ExchangeError::Other("Invalid qty".into()))?;
 
-        let side_str = trade_arr[3]
+        let side_str = trade_data["side"]
             .as_str()
             .ok_or_else(|| ExchangeError::Other("Invalid side".into()))?;
 
-        let side = if side_str == "b" { Side::Buy } else { Side::Sell };
+        let side = if side_str == "buy" {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
 
-        let timestamp = DateTime::from_timestamp(timestamp_f64 as i64, 0).unwrap_or_else(Utc::now);
+        // v2 uses RFC3339 timestamp strings
+        let timestamp_str = trade_data["timestamp"]
+            .as_str()
+            .ok_or_else(|| ExchangeError::Other("Invalid timestamp".into()))?;
+
+        let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp_str)
+            .map_err(|e| ExchangeError::Other(format!("Failed to parse timestamp: {}", e)))?
+            .with_timezone(&Utc);
+
+        // Use trade_id if available, otherwise construct from timestamp
+        let trade_id = if let Some(id) = trade_data["trade_id"].as_u64() {
+            id.to_string()
+        } else {
+            format!("{}_{}", symbol, timestamp.timestamp_millis())
+        };
 
         Ok(Trade {
-            id: format!("{}_{}", pair, timestamp_f64),
-            pair: pair.to_string(),
+            id: trade_id,
+            pair: symbol.to_string(),
             exchange: "kraken".to_string(),
             price,
-            quantity,
+            quantity: qty,
             side,
             timestamp,
             is_maker: None,
@@ -218,27 +230,19 @@ impl KrakenFeed {
     }
 }
 
-// Kraken WebSocket message types
+// Kraken WebSocket v2 message types
 #[derive(Debug, Serialize)]
-struct KrakenSubscribe {
-    event: String,
-    pair: Vec<String>,
-    subscription: KrakenSubscription,
+struct KrakenSubscribeV2 {
+    method: String,
+    params: KrakenSubscriptionParams,
 }
 
 #[derive(Debug, Serialize)]
-struct KrakenSubscription {
-    name: String,
+struct KrakenSubscriptionParams {
+    channel: String,
+    symbol: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     depth: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KrakenBookData {
-    #[serde(rename = "b")]
-    b: Option<Vec<Vec<serde_json::Value>>>, // bids
-    #[serde(rename = "a")]
-    a: Option<Vec<Vec<serde_json::Value>>>, // asks
 }
 
 #[cfg(test)]
@@ -246,39 +250,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_orderbook() {
-        let json = r#"[
-            0,
-            {
-                "b": [["50000.00", "0.5", "1640000000.123"]],
-                "a": [["50001.00", "0.3", "1640000000.124"]]
-            },
-            "book-10",
-            "XBT/USD"
-        ]"#;
+    fn test_parse_orderbook_v2() {
+        let json = r#"{
+            "channel": "book",
+            "type": "snapshot",
+            "data": [{
+                "symbol": "BTC/USD",
+                "bids": [{"price": 50000.0, "qty": 0.5}],
+                "asks": [{"price": 50001.0, "qty": 0.3}]
+            }]
+        }"#;
 
         let orderbook = KrakenFeed::parse_orderbook(json).unwrap();
-        assert_eq!(orderbook.pair, "XBT/USD");
+        assert_eq!(orderbook.pair, "BTC/USD");
         assert_eq!(orderbook.exchange, "kraken");
         assert_eq!(orderbook.bids.len(), 1);
         assert_eq!(orderbook.asks.len(), 1);
+        assert_eq!(orderbook.bids[0].price, 50000.0);
+        assert_eq!(orderbook.bids[0].quantity, 0.5);
     }
 
     #[test]
-    fn test_parse_trade() {
-        let json = r#"[
-            0,
-            [
-                ["50000.00", "0.1", 1640000000.123, "b", "m", ""]
-            ],
-            "trade",
-            "XBT/USD"
-        ]"#;
+    fn test_parse_trade_v2() {
+        let json = r#"{
+            "channel": "trade",
+            "type": "update",
+            "data": [{
+                "symbol": "BTC/USD",
+                "price": 50000.0,
+                "qty": 0.1,
+                "side": "buy",
+                "timestamp": "2024-04-25T12:00:00.000Z"
+            }]
+        }"#;
 
         let trade = KrakenFeed::parse_trade(json).unwrap();
-        assert_eq!(trade.pair, "XBT/USD");
+        assert_eq!(trade.pair, "BTC/USD");
         assert_eq!(trade.exchange, "kraken");
-        assert_eq!(trade.price, 50000.00);
+        assert_eq!(trade.price, 50000.0);
+        assert_eq!(trade.quantity, 0.1);
         assert_eq!(trade.side, Side::Buy);
     }
 }

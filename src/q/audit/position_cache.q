@@ -1,16 +1,13 @@
 / ============================================================================
 / position_cache.q - Position Cache Audit
 / ============================================================================
-/
-/ Verifies that cached positions (stored for performance) match positions
+/ // Verifies that cached positions (stored for performance) match positions
 / calculated from transaction/ledger history. Stale cache entries indicate
 / missed updates or backdated transactions.
-/
-/ Dependencies:
+/ // Dependencies:
 /   - audit.q (core infrastructure)
 /   - engine/position.q (.engine.position.cache, .engine.position.queryDB)
-/
-/ Usage:
+/ // Usage:
 /   .audit.POSITION_CACHE.validate[]
 /   .audit.run[`POSITION_CACHE_AUDIT]
 / ============================================================================

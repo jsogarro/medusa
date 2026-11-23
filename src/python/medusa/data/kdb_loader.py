@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import random
 import re
+import time
 from datetime import datetime
 from typing import Any
 
@@ -22,12 +24,78 @@ def _validate_symbol(symbol: str) -> str:
     return symbol
 
 
+class ResilientKdbConnection:
+    """Wrapper around PyKX connection with auto-reconnect and query retry."""
+
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 5011,
+        username: str | None = None,
+        password: str | None = None,
+        timeout: float = 5.0,
+        max_retries: int = 3,
+    ):
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self._conn: Any = None
+
+    def connect(self) -> None:
+        """Establish connection with retry."""
+        for attempt in range(self.max_retries):
+            try:
+                import pykx as kx
+
+                self._conn = kx.QConnection(
+                    host=self.host,
+                    port=self.port,
+                    username=self.username,
+                    password=self.password,
+                    timeout=self.timeout,
+                )
+                logger.info(f"Connected to kdb+ at {self.host}:{self.port}")
+                return
+            except Exception as e:
+                wait = 2**attempt + random.uniform(0, 1)
+                logger.warning(
+                    f"kdb+ connection failed (attempt {attempt + 1}/{self.max_retries}): {e}, "
+                    f"retrying in {wait:.1f}s"
+                )
+                time.sleep(wait)
+        raise ConnectionError(
+            f"Failed to connect to kdb+ at {self.host}:{self.port} after {self.max_retries} attempts"
+        )
+
+    def disconnect(self) -> None:
+        """Close connection."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+            logger.info("Disconnected from kdb+")
+
+    def query(self, expr: str) -> Any:
+        """Execute query with auto-reconnect on failure."""
+        if self._conn is None:
+            self.connect()
+        try:
+            return self._conn(expr)
+        except Exception:
+            logger.warning("kdb+ connection lost, reconnecting...")
+            self._conn = None
+            self.connect()
+            return self._conn(expr)
+
+
 class KdbDataLoader:
     """Load historical data from kdb+ HDB/RDB using PyKX."""
 
     def __init__(self, config: KdbConfig | None = None) -> None:
         self.config = config or get_settings().kdb
-        self._conn: Any = None
+        self._resilient_conn: ResilientKdbConnection | None = None
 
     def connect(self, port: int | None = None) -> None:
         """Establish PyKX connection to a kdb+ process.
@@ -35,33 +103,30 @@ class KdbDataLoader:
         Args:
             port: Override port (defaults to hdb_port from config).
         """
-        import pykx as kx
-
         target_port = port or self.config.hdb_port
-        self._conn = kx.QConnection(
+        self._resilient_conn = ResilientKdbConnection(
             host=self.config.host,
             port=target_port,
-            username=self.config.username or None,
-            password=self.config.password or None,
+            username=self.config.username,
+            password=self.config.password,
             timeout=self.config.timeout / 1000.0,
         )
-        logger.info(f"Connected to kdb+ at {self.config.host}:{target_port}")
+        self._resilient_conn.connect()
 
     def disconnect(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
-            logger.info("Disconnected from kdb+")
+        if self._resilient_conn is not None:
+            self._resilient_conn.disconnect()
+            self._resilient_conn = None
 
     def _ensure_connected(self) -> None:
-        if self._conn is None:
+        if self._resilient_conn is None:
             self.connect()
 
     def query(self, q_expr: str) -> Any:
         """Execute a q expression and return the raw PyKX result."""
         self._ensure_connected()
-        result = self._conn(q_expr)
-        return result
+        assert self._resilient_conn is not None
+        return self._resilient_conn.query(q_expr)
 
     def load_trades(
         self,
@@ -107,13 +172,15 @@ class KdbDataLoader:
         )
         result = self.query(q_expr)
         df: pd.DataFrame = result.pd()
-        df = df.rename(columns={
-            "time": "timestamp",
-            "bid": "bid_price",
-            "bidSize": "bid_size",
-            "ask": "ask_price",
-            "askSize": "ask_size",
-        })
+        df = df.rename(
+            columns={
+                "time": "timestamp",
+                "bid": "bid_price",
+                "bidSize": "bid_size",
+                "ask": "ask_price",
+                "askSize": "ask_size",
+            }
+        )
         logger.info(f"Loaded {len(df)} quotes for {symbol}")
         return df
 
@@ -144,7 +211,9 @@ class KdbDataLoader:
             "4h": "04:00:00",
         }
         if interval not in interval_map:
-            raise ValueError(f"Unsupported interval: {interval!r}. Use one of: {sorted(interval_map)}")
+            raise ValueError(
+                f"Unsupported interval: {interval!r}. Use one of: {sorted(interval_map)}"
+            )
         kdb_interval = interval_map[interval]
 
         sd = start_date.strftime("%Y.%m.%d")

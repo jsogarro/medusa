@@ -22,15 +22,29 @@ htmlcov/
 *.log
 *.qlog
 .q_history
+*.q.backup
+/test_*.q
 
 # Data (do not commit real market data)
 data/*
 !data/.gitkeep
+*.db
 
 # Environment
 .env
+.env.*
+!.env.example
+!.env.sample
 .env.local
 *.qlic
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*credentials*.json
+*secrets*.json
 
 # IDE
 .vscode/
@@ -50,6 +64,22 @@ Thumbs.db
 logs/*
 !logs/.gitkeep
 
-# AI artifacts (not versioned)
+# AI/private agent artifacts (not versioned)
 ai/
+**/ai/
+.ai/
+.agents/
+.claude/
+.codex/
+/VAULT/
+/Plans/
+/reviews/
+AGENTS.md
 CLAUDE.md
+CLAUDE.md.backup-*
+GEMINI.md
+docs/claude/
+docs/ai/
+
+# Design artifacts (private — kept local only)
+design-artifacts/

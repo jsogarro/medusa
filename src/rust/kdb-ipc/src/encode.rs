@@ -28,9 +28,7 @@ pub struct Encoder {
 impl Encoder {
     /// Create a new encoder
     pub fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-        }
+        Self { buffer: Vec::new() }
     }
 
     /// Encode an async message (fire-and-forget)
@@ -67,10 +65,7 @@ impl Encoder {
     /// Write list length with overflow check
     fn write_list_length(&mut self, len: usize) -> Result<()> {
         let len_i32 = i32::try_from(len).map_err(|_| {
-            KdbError::EncodingError(format!(
-                "List length {} exceeds maximum i32::MAX",
-                len
-            ))
+            KdbError::EncodingError(format!("List length {} exceeds maximum i32::MAX", len))
         })?;
         self.buffer.write_i32::<LittleEndian>(len_i32)?;
         Ok(())
@@ -457,7 +452,7 @@ mod tests {
         let result = enc.encode_sync(&obj).unwrap();
 
         assert_eq!(result[8], 6); // int list type
-        // Length should be 3
+                                  // Length should be 3
         let len = i32::from_le_bytes([result[10], result[11], result[12], result[13]]);
         assert_eq!(len, 3);
     }

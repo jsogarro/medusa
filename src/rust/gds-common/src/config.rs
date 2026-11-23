@@ -37,6 +37,8 @@ impl Default for GdsConfig {
             tp_user: String::new(),
             tp_password: String::new(),
             exchanges: vec![
+                ExchangeConfig::alpaca(),
+                ExchangeConfig::binance(),
                 ExchangeConfig::bitstamp(),
                 ExchangeConfig::coinbase(),
                 ExchangeConfig::kraken(),
@@ -62,6 +64,16 @@ pub struct ExchangeConfig {
 }
 
 impl ExchangeConfig {
+    pub fn binance() -> Self {
+        Self {
+            name: "binance".to_string(),
+            ws_url: "wss://stream.binance.com:9443/ws".to_string(),
+            rest_url: "https://api.binance.com".to_string(),
+            symbols: vec!["BTC/USDT".to_string(), "ETH/USDT".to_string()],
+            enabled: true,
+        }
+    }
+
     pub fn bitstamp() -> Self {
         Self {
             name: "bitstamp".to_string(),
@@ -85,10 +97,21 @@ impl ExchangeConfig {
     pub fn kraken() -> Self {
         Self {
             name: "kraken".to_string(),
-            ws_url: "wss://ws.kraken.com".to_string(),
+            ws_url: "wss://ws.kraken.com/v2".to_string(),
             rest_url: "https://api.kraken.com/0/public".to_string(),
-            symbols: vec!["XBT/USD".to_string(), "ETH/USD".to_string()],
+            symbols: vec!["BTC/USD".to_string(), "ETH/USD".to_string()],
             enabled: true,
+        }
+    }
+
+    pub fn alpaca() -> Self {
+        Self {
+            name: "alpaca".to_string(),
+            ws_url: "wss://stream.data.alpaca.markets/v2/iex".to_string(),
+            rest_url: "https://data.alpaca.markets".to_string(),
+            symbols: vec!["AAPL".to_string(), "TSLA".to_string()],
+            enabled: std::env::var("ALPACA_API_KEY").is_ok()
+                && std::env::var("ALPACA_SECRET_KEY").is_ok(),
         }
     }
 }

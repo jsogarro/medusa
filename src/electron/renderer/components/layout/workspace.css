@@ -1,0 +1,78 @@
+/* Mosaic component theme overrides for tastytrade dark theme */
+
+.medusa-mosaic {
+  @apply bg-background;
+}
+
+/* Mosaic window container */
+.mosaic-window {
+  @apply border border-border;
+}
+
+/* Mosaic window body */
+.mosaic-window-body {
+  @apply bg-background;
+}
+
+/* Mosaic window toolbar */
+.mosaic-window-toolbar {
+  @apply bg-card text-foreground;
+  height: 1.75rem !important; /* h-7 = 28px */
+  min-height: 1.75rem !important;
+}
+
+/* Mosaic window title */
+.mosaic-window-title {
+  @apply text-muted-foreground text-xs;
+}
+
+/* Mosaic window controls */
+.mosaic-window-controls {
+  @apply flex items-center gap-1;
+}
+
+/* Mosaic preview */
+.mosaic-preview {
+  @apply bg-primary/20 border-2 border-primary;
+}
+
+/* Mosaic split divider */
+.mosaic-split {
+  @apply bg-border;
+  will-change: transform; /* GPU acceleration for drag performance */
+}
+
+.mosaic-split:hover {
+  @apply bg-primary/50;
+}
+
+/* Mosaic drop target */
+.mosaic .drop-target {
+  @apply border-2 border-primary bg-primary/10;
+}
+
+/* Mosaic drag layer */
+.mosaic-drag-preview {
+  @apply bg-card border border-border shadow-lg;
+  will-change: transform; /* GPU acceleration for drag performance */
+}
+
+/* Zero drop target (empty workspace) */
+.mosaic-zero-state {
+  @apply bg-background text-muted-foreground;
+}
+
+/* Custom toolbar button styles */
+.mosaic-window-toolbar button {
+  @apply text-muted-foreground hover:text-foreground transition-colors;
+  @apply h-5 w-5 flex items-center justify-center;
+}
+
+.mosaic-window-toolbar button:hover {
+  @apply bg-muted/50;
+}
+
+/* Hide default toolbar controls, we'll use custom ones */
+.mosaic-default-control {
+  display: none;
+}

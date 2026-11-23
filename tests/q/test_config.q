@@ -1,140 +1,125 @@
-/ Integration tests for full configuration system
-\l ../../src/q/config/config.q
+/ Tests for .conf namespace (config/config.q, parser.q, validator.q, loader.q)
 
-/ Simple test framework
-assert:{[condition;msg]
-  if[not condition; -1 "FAIL: ",msg; exit 1];
-  -1 "PASS: ",msg
- };
+\l tests/q/test_framework.q
+\l src/q/config/config.q
 
-/ Test 1: Full initialization
-testInit:{
-  / Define defaults
-  defaults:()!();
-  defaults[`strategy]:()!();
-  defaults[`strategy][`tick_sleep]:"100";
-  defaults[`strategy][`max_notional]:"5000";
-  defaults[`exchange]:()!();
-  defaults[`exchange][`name]:"kraken";
+/ ========================================
+/ Parser tests
+/ ========================================
 
-  / Create test config file
-  conf:("[strategy]";"tick_sleep=50");
-  `:test_init.conf 0: conf;
+test_parser_trim:{
+  .test.assertEqual["Trim leading spaces"; "hello"; .conf.parser.trim["  hello"]];
+  .test.assertEqual["Trim trailing spaces"; "world"; .conf.parser.trim["world  "]];
+  .test.assertEqual["Trim both"; "test"; .conf.parser.trim["  test  "]];
+ }
 
-  / Initialize
-  .conf.init["test_init.conf"; defaults; ()];
+test_parser_parseLine_comment:{
+  .test.assertEqual["Comment line skipped"; (); .conf.parser.parseLine["# this is a comment"]];
+ }
 
-  / Assertions
-  assert["50"~.conf.get[`strategy; `tick_sleep; "100"]; "Config value from file"];
-  assert["5000"~.conf.get[`strategy; `max_notional; "0"]; "Config value from defaults"];
-  assert["kraken"~.conf.get[`exchange; `name; ""]; "Config value from defaults"];
+test_parser_parseLine_empty:{
+  .test.assertEqual["Empty line skipped"; (); .conf.parser.parseLine[""]];
+  .test.assertEqual["Whitespace line skipped"; (); .conf.parser.parseLine["   "]];
+ }
 
-  / Cleanup
-  hdel `test_init.conf;
+test_parser_parseLine_section:{
+  result:.conf.parser.parseLine["[strategy]"];
+  .test.assertEqual["Section detected"; `section; result 0];
+  .test.assertEqual["Section name parsed"; `strategy; result 1];
+ }
 
-  -1 "✓ testInit passed";
- };
+test_parser_parseLine_kv:{
+  result:.conf.parser.parseLine["tick_sleep=100"];
+  .test.assertEqual["KV detected"; `kv; result 0];
+  .test.assertEqual["Key parsed"; `tick_sleep; result 1];
+  .test.assertEqual["Value parsed"; "100"; result 2];
+ }
 
-/ Test 2: getTyped with type coercion
-testGetTyped:{
-  / Define defaults
-  defaults:()!();
-  defaults[`strategy]:()!();
-  defaults[`strategy][`tick_sleep]:"100";
-  defaults[`strategy][`enabled]:"true";
-  defaults[`strategy][`symbols]:"AAPL,GOOG,MSFT";
+/ ========================================
+/ Validator tests
+/ ========================================
 
-  / Initialize
-  .conf.init[(); defaults; ()];
+test_validator_coerceInt:{
+  .test.assertEqual["Parse valid int"; 42; .conf.validator.coerceInt["42"]];
+  .test.assertEqual["Parse negative"; -10; .conf.validator.coerceInt["-10"]];
+ }
 
-  / Test type coercion
-  assert[100~.conf.getTyped[`strategy; `tick_sleep; `int; 0]; "Integer coercion"];
-  assert[1b~.conf.getTyped[`strategy; `enabled; `bool; 0b]; "Boolean coercion"];
-  assert[(`AAPL`GOOG`MSFT)~.conf.getTyped[`strategy; `symbols; `list; ()]; "List coercion"];
+test_validator_coerceFloat:{
+  .test.assertEqual["Parse valid float"; 3.14; .conf.validator.coerceFloat["3.14"]];
+  .test.assertEqual["Parse negative float"; -2.5; .conf.validator.coerceFloat["-2.5"]];
+ }
 
-  -1 "✓ testGetTyped passed";
- };
+test_validator_coerceSymbol:{
+  .test.assertEqual["Convert to symbol"; `hello; .conf.validator.coerceSymbol["hello"]];
+ }
 
-/ Test 3: set (runtime override)
-testSet:{
-  / Define defaults
-  defaults:()!();
-  defaults[`strategy]:()!();
-  defaults[`strategy][`tick_sleep]:"100";
+test_validator_coerceBool_true:{
+  .test.assert["'true' is 1b"; .conf.validator.coerceBool["true"]];
+  .test.assert["'1' is 1b"; .conf.validator.coerceBool["1"]];
+  .test.assert["'yes' is 1b"; .conf.validator.coerceBool["yes"]];
+ }
 
-  / Initialize
-  .conf.init[(); defaults; ()];
+test_validator_coerceBool_false:{
+  .test.assert["'false' is 0b"; not .conf.validator.coerceBool["false"]];
+  .test.assert["'0' is 0b"; not .conf.validator.coerceBool["0"]];
+  .test.assert["'no' is 0b"; not .conf.validator.coerceBool["no"]];
+ }
 
-  / Set new value
-  .conf.set[`strategy; `tick_sleep; "25"];
+test_validator_coerce_typed:{
+  .test.assertEqual["Coerce as int"; 42; .conf.validator.coerce[`int; "42"]];
+  .test.assertEqual["Coerce as float"; 3.14; .conf.validator.coerce[`float; "3.14"]];
+  .test.assertEqual["Coerce as symbol"; `test; .conf.validator.coerce[`symbol; "test"]];
+  .test.assert["Coerce as bool"; .conf.validator.coerce[`bool; "true"]];
+  .test.assertEqual["Coerce as string"; "raw"; .conf.validator.coerce[`string; "raw"]];
+ }
 
-  / Verify
-  assert["25"~.conf.get[`strategy; `tick_sleep; "0"]; "Runtime override works"];
+/ ========================================
+/ Loader tests
+/ ========================================
 
-  -1 "✓ testSet passed";
- };
+test_loader_merge_empty:{
+  base:()!();
+  override:()!();
+  result:.conf.loader.merge[base; override];
+  .test.assertEqual["Merge empty dicts"; ()!(); result];
+ }
 
-/ Test 4: get with default
-testGetDefault:{
-  / Define defaults (empty)
-  defaults:()!();
+test_loader_merge_override:{
+  base:enlist[`section1]!enlist `key1`key2!(10;20);
+  override:enlist[`section1]!enlist `key2`key3!(99;30);
+  result:.conf.loader.merge[base; override];
+  .test.assertEqual["key2 overridden"; 99; result[`section1;`key2]];
+  .test.assertEqual["key3 added"; 30; result[`section1;`key3]];
+  .test.assertEqual["key1 preserved"; 10; result[`section1;`key1]];
+ }
 
-  / Initialize
-  .conf.init[(); defaults; ()];
+/ ========================================
+/ Config API tests
+/ ========================================
 
-  / Get nonexistent key with default
-  result:.conf.get[`strategy; `tick_sleep; "999"];
-  assert["999"~result; "Default value returned for nonexistent key"];
+test_config_get_default:{
+  .conf.current:enlist[`test]!enlist `foo!(42);
+  val:.conf.get[`test; `bar; 99];
+  .test.assertEqual["Missing key returns default"; 99; val];
+ }
 
-  -1 "✓ testGetDefault passed";
- };
+test_config_get_existing:{
+  .conf.current:enlist[`test]!enlist `foo!(42);
+  val:.conf.get[`test; `foo; 99];
+  .test.assertEqual["Existing key returns value"; 42; val];
+ }
 
-/ Test 5: initWithReload
-testReload:{
-  / Define defaults
-  defaults:()!();
-  defaults[`strategy]:()!();
-  defaults[`strategy][`tick_sleep]:"100";
+test_config_set:{
+  .conf.current:()!();
+  .conf.set[`section1; `key1; 123];
+  .test.assertEqual["Set value persists"; 123; .conf.current[`section1;`key1]];
+ }
 
-  / Create config file
-  conf:("[strategy]";"tick_sleep=50");
-  `:test_reload.conf 0: conf;
+test_config_getTyped:{
+  .conf.current:enlist[`test]!enlist (enlist `num)!enlist "42";
+  val:.conf.getTyped[`test; `num; `int; 0];
+  .test.assertEqual["Type coercion applied"; 42; val];
+  .test.assertType["Coerced to int"; -7h; val];
+ }
 
-  / Initialize with reload support
-  .conf.initWithReload["test_reload.conf"; defaults; ()];
-
-  / Verify initial value
-  assert["50"~.conf.get[`strategy; `tick_sleep; "0"]; "Initial value from file"];
-
-  / Modify config file
-  conf2:("[strategy]";"tick_sleep=25");
-  `:test_reload.conf 0: conf2;
-
-  / Reload
-  .conf.reload[];
-
-  / Verify reloaded value
-  assert["25"~.conf.get[`strategy; `tick_sleep; "0"]; "Reloaded value from file"];
-
-  / Cleanup
-  hdel `test_reload.conf;
-
-  -1 "✓ testReload passed";
- };
-
-/ Run all tests
--1 "";
--1 "Running config integration tests...";
--1 "";
-
-testInit[];
-testGetTyped[];
-testSet[];
-testGetDefault[];
-testReload[];
-
--1 "";
--1 "All config integration tests passed!";
--1 "";
-
-exit 0
+-1 "Config tests loaded";

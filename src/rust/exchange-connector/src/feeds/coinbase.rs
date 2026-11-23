@@ -1,6 +1,8 @@
 //! Coinbase WebSocket feed implementation
 //!
-//! WebSocket documentation: https://docs.cloud.coinbase.com/exchange/docs/websocket-overview
+//! Supports both Exchange API (legacy) and Advanced Trade API WebSocket feeds.
+//! - Exchange API: wss://ws-feed.exchange.coinbase.com
+//! - Advanced Trade: wss://advanced-trade-ws.coinbase.com
 
 use crate::client::ExchangeError;
 use crate::types::{OrderBook, PriceLevel, Side, Trade};
@@ -11,25 +13,46 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-const COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
+const LEGACY_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
+const ADVANCED_WS_URL: &str = "wss://advanced-trade-ws.coinbase.com";
 
 /// Coinbase WebSocket feed
 pub struct CoinbaseFeed {
     client: WebSocketClient,
+    use_advanced: bool,
 }
 
 impl CoinbaseFeed {
     /// Create a new Coinbase WebSocket feed
+    ///
+    /// # Environment Variables
+    /// * `COINBASE_USE_ADVANCED_TRADE` - Set to "true" for Advanced Trade API (default: true)
     pub async fn new() -> Result<(Self, mpsc::UnboundedReceiver<WsMessage>), ExchangeError> {
+        let use_advanced = std::env::var("COINBASE_USE_ADVANCED_TRADE")
+            .unwrap_or_else(|_| "true".to_string())
+            == "true";
+
+        let url = if use_advanced {
+            ADVANCED_WS_URL
+        } else {
+            LEGACY_WS_URL
+        };
+
         let config = WsConfig {
-            url: COINBASE_WS_URL.to_string(),
+            url: url.to_string(),
             heartbeat_interval: Duration::from_secs(30),
             reconnect_config: ReconnectConfig::default(),
         };
 
         let (client, rx) = WebSocketClient::connect(config).await?;
 
-        Ok((Self { client }, rx))
+        Ok((
+            Self {
+                client,
+                use_advanced,
+            },
+            rx,
+        ))
     }
 
     /// Subscribe to level2 orderbook for a product
@@ -40,50 +63,128 @@ impl CoinbaseFeed {
         // Security: Validate product_id format (e.g., "BTC-USD")
         if !product_id.chars().all(|c| c.is_alphanumeric() || c == '-') {
             return Err(ExchangeError::InvalidRequest(
-                "Product ID must contain only alphanumeric characters and hyphens".into()
+                "Product ID must contain only alphanumeric characters and hyphens".into(),
             ));
         }
 
-        let sub_msg = CoinbaseSubscribe {
-            r#type: "subscribe".to_string(),
-            product_ids: vec![product_id.to_uppercase()],
-            channels: vec!["level2".to_string()],
-        };
+        let json = if self.use_advanced {
+            serde_json::to_string(&CoinbaseAdvancedSubscribe {
+                r#type: "subscribe".to_string(),
+                product_ids: vec![product_id.to_uppercase()],
+                channel: "level2".to_string(),
+            })
+        } else {
+            serde_json::to_string(&CoinbaseLegacySubscribe {
+                r#type: "subscribe".to_string(),
+                product_ids: vec![product_id.to_uppercase()],
+                channels: vec!["level2".to_string()],
+            })
+        }
+        .map_err(|e| ExchangeError::Other(format!("JSON serialization error: {}", e)))?;
 
-        let json = serde_json::to_string(&sub_msg)
-            .map_err(|e| ExchangeError::Other(format!("JSON serialization error: {}", e)))?;
-
-        debug!("Subscribing to Coinbase level2 for: {}", product_id);
+        debug!(
+            "Subscribing to Coinbase level2 for: {} (advanced: {})",
+            product_id, self.use_advanced
+        );
         self.client.send_text(&json).await
     }
 
-    /// Subscribe to trades (matches channel) for a product
+    /// Subscribe to trades for a product
     ///
     /// # Security
     /// Validates product_id format.
+    ///
+    /// # Notes
+    /// - Legacy API: uses "matches" channel
+    /// - Advanced Trade: uses "market_trades" channel
     pub async fn subscribe_trades(&self, product_id: &str) -> Result<(), ExchangeError> {
         // Security: Validate product_id format
         if !product_id.chars().all(|c| c.is_alphanumeric() || c == '-') {
             return Err(ExchangeError::InvalidRequest(
-                "Product ID must contain only alphanumeric characters and hyphens".into()
+                "Product ID must contain only alphanumeric characters and hyphens".into(),
             ));
         }
 
-        let sub_msg = CoinbaseSubscribe {
-            r#type: "subscribe".to_string(),
-            product_ids: vec![product_id.to_uppercase()],
-            channels: vec!["matches".to_string()],
+        let channel = if self.use_advanced {
+            "market_trades"
+        } else {
+            "matches"
         };
 
-        let json = serde_json::to_string(&sub_msg)
-            .map_err(|e| ExchangeError::Other(format!("JSON serialization error: {}", e)))?;
+        let json = if self.use_advanced {
+            serde_json::to_string(&CoinbaseAdvancedSubscribe {
+                r#type: "subscribe".to_string(),
+                product_ids: vec![product_id.to_uppercase()],
+                channel: channel.to_string(),
+            })
+        } else {
+            serde_json::to_string(&CoinbaseLegacySubscribe {
+                r#type: "subscribe".to_string(),
+                product_ids: vec![product_id.to_uppercase()],
+                channels: vec![channel.to_string()],
+            })
+        }
+        .map_err(|e| ExchangeError::Other(format!("JSON serialization error: {}", e)))?;
 
-        debug!("Subscribing to Coinbase matches for: {}", product_id);
+        debug!("Subscribing to Coinbase {} for: {}", channel, product_id);
         self.client.send_text(&json).await
     }
 
-    /// Parse Coinbase level2 snapshot into OrderBook
-    pub fn parse_orderbook(text: &str) -> Result<OrderBook, ExchangeError> {
+    /// Parse Coinbase level2 snapshot/update into OrderBook
+    ///
+    /// Handles both Legacy and Advanced Trade message formats.
+    pub fn parse_orderbook(text: &str, use_advanced: bool) -> Result<OrderBook, ExchangeError> {
+        if use_advanced {
+            // Try Advanced Trade format first
+            if let Ok(msg) = serde_json::from_str::<AdvancedTradeMessage>(text) {
+                if msg.channel != "level2" && msg.channel != "l2_data" {
+                    return Err(ExchangeError::Other(format!(
+                        "Expected level2/l2_data channel, got '{}'",
+                        msg.channel
+                    )));
+                }
+
+                if let Some(event) = msg.events.first() {
+                    let product_id = event.product_id.as_ref().ok_or_else(|| {
+                        ExchangeError::Other("Missing product_id in event".into())
+                    })?;
+
+                    let mut bids = Vec::new();
+                    let mut asks = Vec::new();
+
+                    for update in &event.updates {
+                        let price: f64 = update.price_level.parse().map_err(|_| {
+                            ExchangeError::Other(format!("Invalid price: {}", update.price_level))
+                        })?;
+                        let quantity: f64 = update.new_quantity.parse().map_err(|_| {
+                            ExchangeError::Other(format!(
+                                "Invalid quantity: {}",
+                                update.new_quantity
+                            ))
+                        })?;
+
+                        let level = PriceLevel { price, quantity };
+
+                        if update.side.to_uppercase() == "BID" {
+                            bids.push(level);
+                        } else {
+                            asks.push(level);
+                        }
+                    }
+
+                    return Ok(OrderBook {
+                        pair: product_id.replace('-', "/"),
+                        exchange: "coinbase".to_string(),
+                        bids,
+                        asks,
+                        timestamp: Utc::now(),
+                        sequence: None,
+                    });
+                }
+            }
+        }
+
+        // Legacy Exchange API format
         let msg: CoinbaseLevel2Message = serde_json::from_str(text)?;
 
         if msg.r#type != "snapshot" && msg.r#type != "l2update" {
@@ -120,8 +221,49 @@ impl CoinbaseFeed {
         })
     }
 
-    /// Parse Coinbase match message into Trade
-    pub fn parse_trade(text: &str) -> Result<Trade, ExchangeError> {
+    /// Parse Coinbase trade message
+    ///
+    /// Handles both Legacy (match) and Advanced Trade (market_trades) formats.
+    pub fn parse_trade(text: &str, use_advanced: bool) -> Result<Trade, ExchangeError> {
+        if use_advanced {
+            // Try Advanced Trade format
+            if let Ok(msg) = serde_json::from_str::<AdvancedTradeMessage>(text) {
+                if msg.channel != "market_trades" {
+                    return Err(ExchangeError::Other(format!(
+                        "Expected market_trades channel, got '{}'",
+                        msg.channel
+                    )));
+                }
+
+                if let Some(event) = msg.events.first() {
+                    if let Some(trade) = event.trades.first() {
+                        let timestamp = DateTime::parse_from_rfc3339(&trade.time)
+                            .ok()
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(Utc::now);
+
+                        let side = if trade.side.to_uppercase() == "BUY" {
+                            Side::Buy
+                        } else {
+                            Side::Sell
+                        };
+
+                        return Ok(Trade {
+                            id: trade.trade_id.clone(), // String in Advanced Trade
+                            pair: trade.product_id.replace('-', "/"),
+                            exchange: "coinbase".to_string(),
+                            price: trade.price.parse().unwrap_or(0.0),
+                            quantity: trade.size.parse().unwrap_or(0.0),
+                            side,
+                            timestamp,
+                            is_maker: None, // Not provided in Advanced Trade
+                        });
+                    }
+                }
+            }
+        }
+
+        // Legacy Exchange API format
         let msg: CoinbaseMatchMessage = serde_json::from_str(text)?;
 
         if msg.r#type != "match" && msg.r#type != "last_match" {
@@ -155,14 +297,22 @@ impl CoinbaseFeed {
     }
 }
 
-// Coinbase WebSocket message types
+// Coinbase WebSocket message types (both Legacy and Advanced Trade)
 #[derive(Debug, Serialize)]
-struct CoinbaseSubscribe {
+struct CoinbaseLegacySubscribe {
     r#type: String,
     product_ids: Vec<String>,
     channels: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct CoinbaseAdvancedSubscribe {
+    r#type: String,
+    product_ids: Vec<String>,
+    channel: String,
+}
+
+// Legacy Exchange API message types
 #[derive(Debug, Deserialize)]
 struct CoinbaseLevel2Message {
     r#type: String,
@@ -183,12 +333,49 @@ struct CoinbaseMatchMessage {
     maker_order_id: Option<String>,
 }
 
+// Advanced Trade API message types
+#[derive(Debug, Deserialize)]
+struct AdvancedTradeMessage {
+    channel: String,
+    #[serde(default)]
+    events: Vec<AdvancedTradeEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvancedTradeEvent {
+    #[allow(dead_code)]
+    r#type: String,
+    #[serde(default)]
+    product_id: Option<String>,
+    #[serde(default)]
+    updates: Vec<AdvancedTradeUpdate>,
+    #[serde(default)]
+    trades: Vec<AdvancedTradeTrade>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvancedTradeUpdate {
+    side: String, // "BID" or "OFFER"
+    price_level: String,
+    new_quantity: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvancedTradeTrade {
+    trade_id: String, // String in Advanced Trade!
+    product_id: String,
+    price: String,
+    size: String,
+    side: String, // "BUY" or "SELL" (uppercase)
+    time: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_orderbook() {
+    fn test_parse_orderbook_legacy() {
         let json = r#"{
             "type": "snapshot",
             "product_id": "BTC-USD",
@@ -196,7 +383,7 @@ mod tests {
             "asks": [["50001.00", "0.3"], ["50002.00", "0.8"]]
         }"#;
 
-        let orderbook = CoinbaseFeed::parse_orderbook(json).unwrap();
+        let orderbook = CoinbaseFeed::parse_orderbook(json, false).unwrap();
         assert_eq!(orderbook.pair, "BTC/USD");
         assert_eq!(orderbook.exchange, "coinbase");
         assert_eq!(orderbook.bids.len(), 2);
@@ -204,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_trade() {
+    fn test_parse_trade_legacy() {
         let json = r#"{
             "type": "match",
             "trade_id": 12345,
@@ -216,10 +403,98 @@ mod tests {
             "maker_order_id": "abc123"
         }"#;
 
-        let trade = CoinbaseFeed::parse_trade(json).unwrap();
+        let trade = CoinbaseFeed::parse_trade(json, false).unwrap();
         assert_eq!(trade.pair, "BTC/USD");
         assert_eq!(trade.exchange, "coinbase");
         assert_eq!(trade.price, 50000.00);
         assert_eq!(trade.side, Side::Buy);
+    }
+
+    #[test]
+    fn test_parse_trade_advanced() {
+        let json = r#"{
+            "channel": "market_trades",
+            "events": [{
+                "type": "update",
+                "trades": [{
+                    "trade_id": "12345",
+                    "product_id": "BTC-USD",
+                    "price": "50000.00",
+                    "size": "0.1",
+                    "side": "BUY",
+                    "time": "2024-01-01T00:00:00.000000Z"
+                }]
+            }]
+        }"#;
+
+        let trade = CoinbaseFeed::parse_trade(json, true).unwrap();
+        assert_eq!(trade.pair, "BTC/USD");
+        assert_eq!(trade.exchange, "coinbase");
+        assert_eq!(trade.price, 50000.00);
+        assert_eq!(trade.side, Side::Buy);
+        assert_eq!(trade.id, "12345");
+    }
+
+    #[test]
+    fn test_parse_orderbook_advanced_l2_data() {
+        let json = r#"{
+            "channel": "l2_data",
+            "sequence_num": 42,
+            "events": [{
+                "type": "snapshot",
+                "product_id": "BTC-USD",
+                "updates": [
+                    {
+                        "side": "bid",
+                        "price_level": "50000.00",
+                        "new_quantity": "0.5"
+                    },
+                    {
+                        "side": "offer",
+                        "price_level": "50001.00",
+                        "new_quantity": "0.3"
+                    }
+                ]
+            }]
+        }"#;
+
+        let orderbook = CoinbaseFeed::parse_orderbook(json, true).unwrap();
+        assert_eq!(orderbook.pair, "BTC/USD");
+        assert_eq!(orderbook.bids.len(), 1);
+        assert_eq!(orderbook.asks.len(), 1);
+        assert_eq!(orderbook.bids[0].price, 50000.0);
+        assert_eq!(orderbook.asks[0].quantity, 0.3);
+    }
+
+    #[test]
+    fn test_advanced_subscribe_serialization() {
+        let json = serde_json::to_string(&CoinbaseAdvancedSubscribe {
+            r#type: "subscribe".to_string(),
+            product_ids: vec!["BTC-USD".to_string()],
+            channel: "market_trades".to_string(),
+        })
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(payload["type"], "subscribe");
+        assert_eq!(payload["channel"], "market_trades");
+        assert_eq!(payload["product_ids"][0], "BTC-USD");
+        assert!(payload.get("channels").is_none());
+    }
+
+    #[test]
+    fn test_legacy_subscribe_serialization() {
+        let json = serde_json::to_string(&CoinbaseLegacySubscribe {
+            r#type: "subscribe".to_string(),
+            product_ids: vec!["BTC-USD".to_string()],
+            channels: vec!["matches".to_string()],
+        })
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(payload["type"], "subscribe");
+        assert_eq!(payload["channels"][0], "matches");
+        assert_eq!(payload["product_ids"][0], "BTC-USD");
+        assert!(payload.get("channel").is_none());
     }
 }
