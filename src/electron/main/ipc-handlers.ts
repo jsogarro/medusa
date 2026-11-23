@@ -51,6 +51,11 @@ const ordersInFlight = new Set<string>()
 const unknownOutcomes = new Map<string, number>()
 const UNKNOWN_OUTCOME_HOLD_MS = 5 * 60_000
 
+/** Entries in the unknown-outcome hold map (exported for tests). */
+export function heldOrderCount(): number {
+  return unknownOutcomes.size
+}
+
 const orderKey = (o: ValidatedOrder) =>
   [o.exchange, o.pair, o.side, o.orderType, o.quantity, o.price].join('|')
 
@@ -198,6 +203,7 @@ export function setupIpcHandlers(): void {
     const order = validateOrder(orderData)
     if (!rdbClient) throw new Error('Not connected to RDB')
     const key = orderKey(order)
+    for (const [k, until] of unknownOutcomes) if (until <= Date.now()) unknownOutcomes.delete(k)
     if (ordersInFlight.has(key)) {
       throw new Error('An identical order is already in flight')
     }

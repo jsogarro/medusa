@@ -65,7 +65,7 @@ vi.mock('./kdb-client', async () => {
 })
 
 import { pathToFileURL } from 'node:url'
-import { checkIpcLimit, setupIpcHandlers } from './ipc-handlers'
+import { checkIpcLimit, heldOrderCount, setupIpcHandlers } from './ipc-handlers'
 import { RENDERER_FILE } from './security'
 
 const TRUSTED = { senderFrame: { url: pathToFileURL(RENDERER_FILE).href } }
@@ -246,6 +246,22 @@ describe('kdb:placeOrder outcome once the request has been issued', () => {
     expect(r.outcomeUnknown).toBeUndefined()
     place(() => ({ orderId: 'ORD_9' }))
     expect((await call('kdb:placeOrder', order)).success).toBe(true)
+  })
+})
+
+describe('unknown-outcome hold bookkeeping', () => {
+  it('drops expired holds so the map cannot grow without bound', async () => {
+    h.respond = (fn) => {
+      if (fn === '.risk.validateOrder') return [true, null]
+      throw timeout()
+    }
+    for (let i = 0; i < 5; i++) await call('kdb:placeOrder', { ...order, quantity: i + 1 })
+    expect(heldOrderCount()).toBeGreaterThanOrEqual(5)
+
+    vi.setSystemTime(Date.now() + 10 * 60_000)
+    h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : { orderId: 'ORD_5' })
+    await call('kdb:placeOrder', { ...order, quantity: 99 })
+    expect(heldOrderCount()).toBe(0)
   })
 })
 
