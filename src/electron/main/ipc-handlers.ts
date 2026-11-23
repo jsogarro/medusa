@@ -67,40 +67,53 @@ function handle(channel: string, fn: (event: IpcMainInvokeEvent, ...args: any[])
   })
 }
 
+let connectQueue: Promise<unknown> = Promise.resolve()
+
+async function connectClients(config: KdbConfig): Promise<{ success: true }> {
+  if (
+    currentConfig &&
+    tpClient?.isConnected() &&
+    rdbClient?.isConnected() &&
+    sameEndpoint(currentConfig.tp, config.tp) &&
+    sameEndpoint(currentConfig.rdb, config.rdb)
+  ) {
+    return { success: true }
+  }
+  checkIpcLimit('kdb:connect')
+
+  try {
+    await disconnectClients()
+
+    const tp = new KdbClient(config.tp)
+    tpClient = tp
+    await tp.connect()
+    attachTpUpdateForwarding(tp)
+
+    const rdb = new KdbClient(config.rdb)
+    rdbClient = rdb
+    await rdb.connect()
+
+    currentConfig = config
+    return { success: true }
+  } catch (error) {
+    await disconnectClients()
+    throw error
+  }
+}
+
 export function setupIpcHandlers(): void {
   const limit = checkIpcLimit
 
   // Connect to kdb+ (TP and RDB). Idempotent for an unchanged config so a second
   // window cannot tear down the link the first one is using.
-  handle('kdb:connect', async (_event, rawConfig: unknown) => {
+  handle('kdb:connect', (_event, rawConfig: unknown) => {
     const config = validateKdbConfig(rawConfig)
-    if (
-      currentConfig &&
-      tpClient?.isConnected() &&
-      rdbClient?.isConnected() &&
-      sameEndpoint(currentConfig.tp, config.tp) &&
-      sameEndpoint(currentConfig.rdb, config.rdb)
-    ) {
-      return { success: true }
-    }
-    limit('kdb:connect')
-
-    try {
-      await disconnectClients()
-
-      tpClient = new KdbClient(config.tp)
-      await tpClient.connect()
-      attachTpUpdateForwarding(tpClient)
-
-      rdbClient = new KdbClient(config.rdb)
-      await rdbClient.connect()
-
-      currentConfig = config
-      return { success: true }
-    } catch (error) {
-      await disconnectClients()
-      throw error
-    }
+    // Run connects one at a time: a concurrent call otherwise tears down and replaces a client
+    // that is still mid-connect, leaving it orphaned and reconnecting forever. Queued calls with
+    // an unchanged config then hit the idempotent branch and share the first connection.
+    const run = connectQueue.then(() => connectClients(config))
+    connectQueue = run.catch(() => undefined)
+    return run
   })
 
   // Subscribe to table updates (validated table name)

@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   queries: [] as { fn: string; args: any[] | undefined }[],
   clients: [] as any[],
   subscribed: [] as string[],
+  connectGate: undefined as Promise<void> | undefined,
   windows: [] as any[],
   respond: (_fn: string, _args?: any[]): any => undefined
 }))
@@ -35,6 +36,7 @@ vi.mock('./kdb-client', async () => {
       h.clients.push(this)
     }
     async connect() {
+      await h.connectGate
       this.connected = true
     }
     async disconnect() {
@@ -239,6 +241,23 @@ describe('kdb:connect', () => {
     expect(h.clients.length).toBe(before)
     expect(first.disconnects).toBe(0)
     expect(first.isConnected()).toBe(true)
+  })
+
+  it('serialises concurrent connects so no client is orphaned', async () => {
+    await call('kdb:connect', { ...cfg, rdb: { host: 'localhost', port: 6100 } }) // force a fresh connect below
+    const before = h.clients.length
+    let release!: () => void
+    h.connectGate = new Promise<void>((r) => (release = r))
+    const next = { ...cfg, rdb: { host: 'localhost', port: 6200 } }
+    const calls = [call('kdb:connect', next), call('kdb:connect', next)]
+    await new Promise((r) => setTimeout(r, 0))
+    release()
+    h.connectGate = undefined
+    expect((await Promise.all(calls)).map((r) => r.success)).toEqual([true, true])
+
+    const created = h.clients.slice(before)
+    expect(created).toHaveLength(2) // one tp + one rdb, shared by both calls
+    expect(created.every((c) => c.connected && c.disconnects === 0)).toBe(true)
   })
 
   it('reconnects when the config changes', async () => {
