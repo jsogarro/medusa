@@ -116,7 +116,7 @@ describe('KdbClient', () => {
     await client.connect()
     h.hangQueries = true
     const p = client.query('.some.fn', [1])
-    const assertion = expect(p).rejects.toThrow(/timed out/)
+    const assertion = expect(p).rejects.toMatchObject({ name: 'KdbTimeoutError', message: expect.stringMatching(/timed out/) })
     await vi.advanceTimersByTimeAsync(1000)
     await assertion
     await client.disconnect()

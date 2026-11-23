@@ -8,7 +8,8 @@ import {
   parseRiskVerdict,
   validateKdbConfig,
   validateOrder,
-  validateSymbol
+  validateSymbol,
+  ValidatedOrder
 } from './validation'
 
 type KdbConfig = { tp: KdbEndpoint; rdb: KdbEndpoint }
@@ -44,6 +45,17 @@ function validatePayloadSize(obj: unknown): void {
     throw new Error(`Payload too large: ${serialized.length} bytes exceeds max ${MAX_PAYLOAD_SIZE} bytes`)
   }
 }
+
+// Identical orders (same economic key) in flight, and those whose outcome is unknown after a timeout.
+const ordersInFlight = new Set<string>()
+const unknownOutcomes = new Map<string, number>()
+const UNKNOWN_OUTCOME_HOLD_MS = 5 * 60_000
+
+const orderKey = (o: ValidatedOrder) =>
+  [o.exchange, o.pair, o.side, o.orderType, o.quantity, o.price].join('|')
+
+const UNKNOWN_OUTCOME_MESSAGE =
+  'Order outcome unknown — kdb+ did not answer in time and the order may have been placed. Check open orders before retrying.'
 
 function sameEndpoint(a: KdbEndpoint, b: KdbEndpoint): boolean {
   return a.host === b.host && a.port === b.port
@@ -185,25 +197,48 @@ export function setupIpcHandlers(): void {
     validatePayloadSize(orderData)
     const order = validateOrder(orderData)
     if (!rdbClient) throw new Error('Not connected to RDB')
+    const key = orderKey(order)
+    if (ordersInFlight.has(key)) {
+      throw new Error('An identical order is already in flight')
+    }
+    const heldUntil = unknownOutcomes.get(key)
+    if (heldUntil !== undefined && heldUntil > Date.now()) {
+      throw new Error(UNKNOWN_OUTCOME_MESSAGE)
+    }
     limit('kdb:placeOrder')
 
-    const verdict = parseRiskVerdict(await rdbClient.query('.risk.validateOrder', [
-      sym(order.strategy), sym(order.pair), sym(order.exchange), sym(order.side),
-      fixedLong(order.quantity), fixedLong(order.price)
-    ]))
-    if (!verdict.ok) {
-      throw new Error(`Order rejected by risk module: ${verdict.reason}`)
-    }
+    ordersInFlight.add(key)
+    try {
+      const verdict = parseRiskVerdict(await rdbClient.query('.risk.validateOrder', [
+        sym(order.strategy), sym(order.pair), sym(order.exchange), sym(order.side),
+        fixedLong(order.quantity), fixedLong(order.price)
+      ]))
+      if (!verdict.ok) {
+        throw new Error(`Order rejected by risk module: ${verdict.reason}`)
+      }
 
-    const result = await rdbClient.query('.exchange.coordinator.placeOrder', [
-      sym(order.exchange), sym(order.pair), sym(order.orderType), sym(order.side),
-      fixedLong(order.price), fixedLong(order.quantity)
-    ])
-    if (typeof result !== 'object' || result === null || typeof (result as any).orderId !== 'string') {
-      throw new Error('Order placement returned no order id')
+      let result: unknown
+      try {
+        result = await rdbClient.query('.exchange.coordinator.placeOrder', [
+          sym(order.exchange), sym(order.pair), sym(order.orderType), sym(order.side),
+          fixedLong(order.price), fixedLong(order.quantity)
+        ])
+      } catch (error: any) {
+        if (error?.name === 'KdbTimeoutError') {
+          unknownOutcomes.set(key, Date.now() + UNKNOWN_OUTCOME_HOLD_MS)
+          return { success: false, outcomeUnknown: true, error: UNKNOWN_OUTCOME_MESSAGE }
+        }
+        throw error
+      }
+      unknownOutcomes.delete(key)
+      if (typeof result !== 'object' || result === null || typeof (result as any).orderId !== 'string') {
+        throw new Error('Order placement returned no order id')
+      }
+      const { orderId, status } = result as { orderId: string; status?: string }
+      return { success: true, data: { orderId, status } }
+    } finally {
+      ordersInFlight.delete(key)
     }
-    const { orderId, status } = result as { orderId: string; status?: string }
-    return { success: true, data: { orderId, status } }
   })
 
   // Setup kdb+ update forwarding (re-attaches an existing TP client when handlers are set up again)

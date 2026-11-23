@@ -4,6 +4,11 @@ import * as q from 'node-q'
 /** Table names are spliced into q text, so only plain lowercase-initial identifiers are accepted. */
 export const SAFE_TABLE = /^[a-z][a-zA-Z0-9_.]*$/
 
+/** The query may still have executed on the q side: a timeout says nothing about the outcome. */
+export class KdbTimeoutError extends Error {
+  override name = 'KdbTimeoutError'
+}
+
 export interface KdbConfig {
   host: string
   port: number
@@ -159,7 +164,7 @@ export class KdbClient extends EventEmitter {
 
     return await new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(`kdb+ query timed out after ${this.queryTimeoutMs}ms`))
+        reject(new KdbTimeoutError(`kdb+ query timed out after ${this.queryTimeoutMs}ms`))
       }, this.queryTimeoutMs)
       const callback = (error: Error | undefined, result: T | undefined) => {
         clearTimeout(timer)

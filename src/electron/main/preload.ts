@@ -4,7 +4,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 export interface KdbApi {
   connect: (config: { tp: { host: string; port: number }; rdb: { host: string; port: number } }) => Promise<{ success: boolean; error?: string }>
   subscribe: (table: string) => Promise<{ success: boolean; error?: string }>
-  placeOrder: (order: any) => Promise<{ success: boolean; data?: any; error?: string }>
+  placeOrder: (order: any) => Promise<{ success: boolean; data?: any; error?: string; outcomeUnknown?: boolean }>
   cancelOrder: (orderId: string, exchange: string) => Promise<{ success: boolean; data?: any; error?: string }>
   getOrders: () => Promise<{ success: boolean; data?: any; error?: string }>
   getPositions: () => Promise<{ success: boolean; data?: any; error?: string }>

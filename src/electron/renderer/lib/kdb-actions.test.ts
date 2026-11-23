@@ -5,7 +5,8 @@ import {
   isPopOutSearch,
   loadKdbConfig,
   pauseAllStrategies,
-  runEmergencyStop
+  runEmergencyStop,
+  submitOrder
 } from './kdb-actions'
 
 const controls = (over: Partial<Record<'emergencyStop' | 'strategyControl', any>> = {}) => ({
@@ -95,5 +96,34 @@ describe('createSubmitGuard', () => {
     const guard = createSubmitGuard()
     await expect(guard(async () => { throw new Error('x') })).rejects.toThrow('x')
     expect(await guard(async () => 'ok')).toBe('ok')
+  })
+})
+
+describe('submitOrder', () => {
+  const order = { exchange: 'alpaca', pair: 'BTC/USD', side: 'buy', orderType: 'limit', price: 1, quantity: 1, strategy: 'manual' }
+  const bridge = (result: unknown) => ({ placeOrder: vi.fn().mockResolvedValue(result) })
+
+  it('reports the order id on success and lets the ticket clear', async () => {
+    const r = await submitOrder(bridge({ success: true, data: { orderId: 'O1' } }), order)
+    expect(r).toMatchObject({ ok: true, hold: false })
+    expect(r.message).toContain('O1')
+  })
+
+  it('reports a plain failure without holding the ticket', async () => {
+    const r = await submitOrder(bridge({ success: false, error: 'Rate limit exceeded' }), order)
+    expect(r).toMatchObject({ ok: false, hold: false })
+    expect(r.message).toContain('Rate limit exceeded')
+  })
+
+  it('holds the ticket and says to check open orders when the outcome is unknown', async () => {
+    const r = await submitOrder(bridge({ success: false, outcomeUnknown: true, error: 'x' }), order)
+    expect(r).toMatchObject({ ok: false, hold: true })
+    expect(r.message).toMatch(/outcome unknown.*open orders/i)
+  })
+
+  it('reports a failure when the bridge rejects or is missing', async () => {
+    const rejecting = { placeOrder: vi.fn().mockRejectedValue(new Error('boom')) }
+    expect((await submitOrder(rejecting, order)).ok).toBe(false)
+    expect((await submitOrder(undefined, order)).ok).toBe(false)
   })
 })

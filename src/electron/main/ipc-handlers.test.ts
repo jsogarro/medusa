@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   clients: [] as any[],
   subscribed: [] as string[],
   connectGate: undefined as Promise<void> | undefined,
+  placeGate: undefined as Promise<void> | undefined,
   windows: [] as any[],
   respond: (_fn: string, _args?: any[]): any => undefined
 }))
@@ -51,6 +52,7 @@ vi.mock('./kdb-client', async () => {
     }
     async query(fn: string, args?: any[]) {
       h.queries.push({ fn, args })
+      if (fn === '.exchange.coordinator.placeOrder') await h.placeGate
       return h.respond(fn, args)
     }
   }
@@ -155,6 +157,90 @@ describe('kdb:placeOrder', () => {
     const r = await h.handlers.get('kdb:placeOrder')!(EVIL, { ...order, pair: 'BTC_USD' })
     expect(r.success).toBe(false)
     expect(h.queries).toHaveLength(0)
+  })
+})
+
+const timeout = () => Object.assign(new Error('kdb+ query timed out after 10000ms'), { name: 'KdbTimeoutError' })
+const placeCalls = () => h.queries.filter((q) => q.fn === '.exchange.coordinator.placeOrder').length
+
+describe('kdb:placeOrder after a timeout', () => {
+  it('reports an unknown outcome, not a plain failure, when the coordinator call times out', async () => {
+    h.respond = (fn) => {
+      if (fn === '.risk.validateOrder') return [true, null]
+      throw timeout()
+    }
+    const r = await call('kdb:placeOrder', order)
+    expect(r.success).toBe(false)
+    expect(r.outcomeUnknown).toBe(true)
+    expect(r.error).toMatch(/outcome unknown.*open orders/i)
+  })
+
+  it('a timed-out risk check is a plain failure: nothing was sent to the exchange', async () => {
+    h.respond = () => {
+      throw timeout()
+    }
+    const r = await call('kdb:placeOrder', order)
+    expect(r.success).toBe(false)
+    expect(r.outcomeUnknown).toBeUndefined()
+  })
+
+  it('refuses an identical resubmit for a while, but not a different order or a later retry', async () => {
+    let fail = true
+    h.respond = (fn) => {
+      if (fn === '.risk.validateOrder') return [true, null]
+      if (fail) throw timeout()
+      return { orderId: 'ORD_2', status: 'open' }
+    }
+    expect((await call('kdb:placeOrder', order)).outcomeUnknown).toBe(true)
+    fail = false
+    expect(placeCalls()).toBe(1)
+
+    const again = await call('kdb:placeOrder', order)
+    expect(again.success).toBe(false)
+    expect(again.error).toMatch(/outcome unknown/i)
+    expect(placeCalls()).toBe(1)
+
+    expect((await call('kdb:placeOrder', { ...order, quantity: 3 })).success).toBe(true)
+
+    vi.setSystemTime(Date.now() + 10 * 60_000)
+    expect((await call('kdb:placeOrder', order)).success).toBe(true)
+  })
+})
+
+describe('kdb:placeOrder in-flight dedupe', () => {
+  it('rejects an identical order while the first is still in flight', async () => {
+    let release!: () => void
+    h.placeGate = new Promise<void>((r) => (release = r))
+    const first = call('kdb:placeOrder', order)
+    await new Promise((r) => setTimeout(r, 0))
+    const second = await call('kdb:placeOrder', { ...order })
+    expect(second.success).toBe(false)
+    expect(second.error).toMatch(/identical order/i)
+    release()
+    h.placeGate = undefined
+    expect((await first).success).toBe(true)
+    expect(placeCalls()).toBe(1)
+  })
+
+  it('lets a different order through concurrently, and the same order again once it finished', async () => {
+    let release!: () => void
+    h.placeGate = new Promise<void>((r) => (release = r))
+    const first = call('kdb:placeOrder', order)
+    const other = call('kdb:placeOrder', { ...order, side: 'sell' })
+    await new Promise((r) => setTimeout(r, 0))
+    release()
+    h.placeGate = undefined
+    expect([(await first).success, (await other).success]).toEqual([true, true])
+    expect((await call('kdb:placeOrder', order)).success).toBe(true)
+  })
+
+  it('releases the slot when the order fails', async () => {
+    h.respond = () => {
+      throw new Error('boom')
+    }
+    expect((await call('kdb:placeOrder', order)).success).toBe(false)
+    h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : { orderId: 'ORD_3' })
+    expect((await call('kdb:placeOrder', order)).success).toBe(true)
   })
 })
 

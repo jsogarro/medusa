@@ -40,6 +40,34 @@ export async function pauseAllStrategies(kdb: KdbControls | undefined, names: st
   return { ok: false, message: `Failed to pause ${failed.length} of ${names.length} strategies: ${failed.join(', ')}` }
 }
 
+export interface OrderBridge {
+  placeOrder: (order: any) => Promise<{ success: boolean; data?: any; error?: string; outcomeUnknown?: boolean }>
+}
+
+export interface SubmitOutcome extends ActionOutcome {
+  /** True when the order may have been placed: the ticket must stay locked until the user changes it. */
+  hold: boolean
+}
+
+/** Place an order and describe the result. The main process answers { success: false } instead of rejecting. */
+export async function submitOrder(kdb: OrderBridge | undefined, order: unknown): Promise<SubmitOutcome> {
+  if (!kdb) return { ok: false, hold: false, message: `Order failed: ${UNAVAILABLE}` }
+  try {
+    const result = await kdb.placeOrder(order)
+    if (result?.success) return { ok: true, hold: false, message: `Order submitted: ${result.data?.orderId}` }
+    if (result?.outcomeUnknown) {
+      return {
+        ok: false,
+        hold: true,
+        message: 'Order outcome unknown — it may have been placed. Check open orders before retrying.'
+      }
+    }
+    return { ok: false, hold: false, message: `Order failed: ${result?.error ?? 'unknown error'}` }
+  } catch (err) {
+    return { ok: false, hold: false, message: `Order failed: ${String(err)}` }
+  }
+}
+
 export interface KdbConfig {
   tp: { host: string; port: number }
   rdb: { host: string; port: number }

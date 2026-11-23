@@ -5,7 +5,7 @@ import { Button } from '../ui/button'
 import { LinkColor, useSymbolLinkStore } from '../../stores/symbolLink'
 import { AlgoSelector, AlgoParams } from '../trading/AlgoSelector'
 import { AssetClassSwitcher } from './AssetClassSwitcher'
-import { createSubmitGuard } from '../../lib/kdb-actions'
+import { createSubmitGuard, submitOrder } from '../../lib/kdb-actions'
 import {
   ASSET_CLASS_CONFIG,
   inferTradingAssetClass,
@@ -54,6 +54,8 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
   const [strategy, setStrategy] = useState('manual')
   const [algoParams, setAlgoParams] = useState<AlgoParams>({ type: 'direct' })
   const [submitting, setSubmitting] = useState(false)
+  // Set when an order timed out with an unknown outcome; cleared once the user changes the order.
+  const [held, setHeld] = useState(false)
   const submitGuard = useRef(createSubmitGuard()).current
 
   useEffect(() => {
@@ -61,6 +63,10 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
       setOrderType(assetConfig.supportedOrderTypes[0])
     }
   }, [assetConfig.supportedOrderTypes, orderType])
+
+  useEffect(() => {
+    setHeld(false)
+  }, [exchange, pair, side, orderType, price, quantity, strategy])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -88,16 +94,13 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
     await submitGuard(async () => {
       setSubmitting(true)
       try {
-        const result = await window.kdb.placeOrder(order)
-        if (result.success) {
-          alert(`Order submitted: ${result.data.orderId}`)
+        const outcome = await submitOrder(window.kdb, order)
+        alert(outcome.message)
+        if (outcome.ok) {
           setPrice('')
           setQuantity('')
-        } else {
-          alert(`Order failed: ${result.error}`)
         }
-      } catch (err) {
-        alert(`Order failed: ${String(err)}`)
+        setHeld(outcome.hold)
       } finally {
         setSubmitting(false)
       }
@@ -217,7 +220,7 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
           <Button
             type="submit"
             className="w-full"
-            disabled={submitting}
+            disabled={submitting || held}
             variant={algoParams.type === 'direct' ? (side === 'buy' ? 'buy' : 'sell') : 'default'}
             style={
               algoParams.type !== 'direct'
@@ -225,7 +228,7 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
                 : undefined
             }
           >
-            {algoParams.type === 'direct' ? 'Submit Order' : 'Start Algo'}
+            {held ? 'Outcome unknown — check open orders' : algoParams.type === 'direct' ? 'Submit Order' : 'Start Algo'}
           </Button>
         </form>
       </CardContent>
