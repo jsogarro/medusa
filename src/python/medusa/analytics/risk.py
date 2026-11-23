@@ -117,7 +117,7 @@ class RiskAnalytics:
             "var_99": RiskAnalytics.var(returns, 0.99),
             "cvar_95": RiskAnalytics.cvar(returns, 0.95),
             "cvar_99": RiskAnalytics.cvar(returns, 0.99),
-            "annualized_return": float(returns.mean() * periods),
+            "annualized_return": float((1 + returns).prod() ** (periods / len(returns)) - 1),
             "annualized_volatility": float(returns.std() * np.sqrt(periods)),
             "skewness": float(returns.skew()),
             "kurtosis": float(returns.kurtosis()),

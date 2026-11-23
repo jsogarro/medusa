@@ -153,3 +153,9 @@ def test_run_signals_accepts_array_like_signals(monkeypatch, as_frame):
     ]
 
 
+@pytest.mark.parametrize("periods", [252, 365])
+def test_full_report_annualized_return_is_cagr_and_matches_calmar(periods):
+    r = pd.Series(np.random.default_rng(1).normal(0.001, 0.02, 200))
+    rep = RiskAnalytics.full_report(r, periods=periods)
+    assert rep["annualized_return"] == pytest.approx((1 + r).prod() ** (periods / len(r)) - 1)
+    assert rep["calmar_ratio"] == pytest.approx(rep["annualized_return"] / abs(rep["max_drawdown"]))
