@@ -145,3 +145,22 @@ def test_validate_symbol_rejects_trailing_newline():
     validate_symbol("AAPL")
     with pytest.raises(ValueError):
         validate_symbol("AAPL\n")
+
+
+def test_order_types_match_the_q_definition():
+    from medusa.data.q_safe import ORDER_TYPES
+
+    assert ORDER_TYPES == {"market", "limit", "stop_loss", "take_profit"}
+
+
+def test_q_long_accepts_numpy_ints_but_not_bool_or_float():
+    import numpy as np
+
+    from medusa.data.q_safe import q_long
+
+    out = q_long(np.int64(5))
+    assert out == 5 and type(out) is int
+    assert q_long(np.int32(-3)) == -3
+    for bad in (np.bool_(True), True, np.float64(1.0), 1.0, "1"):
+        with pytest.raises(ValueError):
+            q_long(bad)
