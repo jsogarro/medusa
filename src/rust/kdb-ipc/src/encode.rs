@@ -294,6 +294,11 @@ impl Encoder {
         self.buffer.write_u8(0)?;
         self.write_list_length(v.len())?;
         for item in v {
+            if item.as_bytes().contains(&0) {
+                return Err(KdbError::EncodingError(
+                    "Symbol cannot contain NUL byte".into(),
+                ));
+            }
             self.buffer.write_all(item.as_bytes())?;
             self.buffer.write_u8(0)?;
         }
@@ -474,5 +479,15 @@ mod tests {
             "6200630b00010000006100000001000000070001000000\
              0100000000000000"
         );
+    }
+
+    #[test]
+    fn test_encode_symbol_list_rejects_nul() {
+        let mut enc = Encoder::new();
+        let obj = KObject::SymbolList(vec!["ok".to_string(), "a\0b".to_string()]);
+        assert!(matches!(
+            enc.encode_sync(&obj),
+            Err(KdbError::EncodingError(_))
+        ));
     }
 }
