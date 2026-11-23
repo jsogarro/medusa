@@ -27,7 +27,7 @@ export class IpcRateLimiter {
     private capacity: number = 100,
     private refillRate: number = 10,
     private overrides: Record<string, RateLimitConfig> = {},
-    private now: () => number = Date.now
+    private now: () => number = () => Date.now()
   ) {}
 
   private configFor(channel: string): RateLimitConfig {
@@ -50,9 +50,10 @@ export class IpcRateLimiter {
     }
 
     // Fractional refill: always advance lastRefill so sub-token elapsed time is not discarded.
+    // A backwards clock step must not move lastRefill back, or the catch-up would refill twice.
     const elapsed = Math.max(0, now - bucket.lastRefill) / 1000
-    bucket.tokens = Math.min(capacity, bucket.tokens + elapsed * refillRate)
-    bucket.lastRefill = now
+    bucket.tokens = Math.max(0, Math.min(capacity, bucket.tokens + elapsed * refillRate))
+    bucket.lastRefill = Math.max(bucket.lastRefill, now)
 
     if (bucket.tokens >= 1) {
       bucket.tokens--

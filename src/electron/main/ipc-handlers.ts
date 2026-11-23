@@ -19,13 +19,21 @@ let currentConfig: KdbConfig | null = null
 let removeTpUpdateForwarder: (() => void) | null = null
 
 // Default budget, plus tighter per-channel budgets for state-changing calls.
-function createRateLimiter(): IpcRateLimiter {
-  return new IpcRateLimiter(100, 10, {
-    'kdb:placeOrder': { capacity: 10, refillRate: 2 },
-    'kdb:cancelOrder': { capacity: 20, refillRate: 5 },
-    'kdb:strategyControl': { capacity: 20, refillRate: 5 },
-    'kdb:connect': { capacity: 5, refillRate: 0.5 }
-  })
+// One limiter for the process lifetime: re-registering handlers must not refill budgets.
+const rateLimiter = new IpcRateLimiter(100, 10, {
+  'kdb:placeOrder': { capacity: 10, refillRate: 2 },
+  'kdb:cancelOrder': { capacity: 20, refillRate: 5 },
+  'kdb:strategyControl': { capacity: 20, refillRate: 5 },
+  'kdb:connect': { capacity: 5, refillRate: 0.5 },
+  'kdb:subscribe': { capacity: 50, refillRate: 5 },
+  'window:popout': { capacity: 5, refillRate: 0.2 }
+})
+
+/** Consume one token for `channel`, throwing when its budget is spent. */
+export function checkIpcLimit(channel: string): void {
+  if (!rateLimiter.checkLimit(channel)) {
+    throw new Error('Rate limit exceeded — too many requests. Please slow down.')
+  }
 }
 
 const MAX_PAYLOAD_SIZE = 10 * 1024  // 10KB max payload (JSON stringified)
@@ -60,12 +68,7 @@ function handle(channel: string, fn: (event: IpcMainInvokeEvent, ...args: any[])
 }
 
 export function setupIpcHandlers(): void {
-  const rateLimiter = createRateLimiter()
-  const limit = (channel: string) => {
-    if (!rateLimiter.checkLimit(channel)) {
-      throw new Error('Rate limit exceeded — too many requests. Please slow down.')
-    }
-  }
+  const limit = checkIpcLimit
 
   // Connect to kdb+ (TP and RDB). Idempotent for an unchanged config so a second
   // window cannot tear down the link the first one is using.
@@ -108,6 +111,7 @@ export function setupIpcHandlers(): void {
     if (typeof table !== 'string' || !SAFE_TABLE.test(table)) {
       throw new Error(`Invalid table name: "${table}"`)
     }
+    limit('kdb:subscribe')
     await tpClient.subscribe(table)
     return { success: true }
   })

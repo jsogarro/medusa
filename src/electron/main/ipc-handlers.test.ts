@@ -55,7 +55,7 @@ vi.mock('./kdb-client', async () => {
   return { KdbClient: FakeKdbClient, SAFE_TABLE: /^[a-z][a-zA-Z0-9_.]*$/ }
 })
 
-import { setupIpcHandlers } from './ipc-handlers'
+import { checkIpcLimit, setupIpcHandlers } from './ipc-handlers'
 
 const TRUSTED = { senderFrame: { url: 'file:///app/out/renderer/index.html' } }
 const EVIL = { senderFrame: { url: 'https://evil.example/' } }
@@ -74,12 +74,17 @@ const order = {
 }
 const typed = (a: any) => ({ type: a.type(), value: a.value() })
 
+// The limiter lives for the whole process, so give every test a fresh budget by letting the clock run.
+let clock = Date.parse('2030-01-01T00:00:00Z')
+
 beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime((clock += 3_600_000))
   h.handlers.clear()
   h.queries.length = 0
   h.subscribed.length = 0
   h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : { orderId: 'ORD_1_alpaca', status: 'open' })
-  setupIpcHandlers() // fresh rate limiter per setup
+  setupIpcHandlers()
   expect((await call('kdb:connect', cfg)).success).toBe(true)
   h.queries.length = 0
 })
@@ -240,6 +245,37 @@ describe('kdb:connect', () => {
     const before = h.clients.length
     await call('kdb:connect', { ...cfg, rdb: { host: 'localhost', port: 6000 } })
     expect(h.clients.length).toBe(before + 2)
+  })
+})
+
+describe('rate limiter lifetime', () => {
+  it('keeps budgets when handlers are registered again', async () => {
+    const burst = async () => {
+      let n = 0
+      for (let i = 0; i < 40; i++) if ((await call('kdb:placeOrder', order)).success) n++
+      return n
+    }
+    expect(await burst()).toBeLessThan(40)
+    setupIpcHandlers()
+    expect(await burst()).toBe(0)
+  })
+
+  it('limits subscriptions and pop-out windows', async () => {
+    const subs: boolean[] = []
+    for (let i = 0; i < 200; i++) subs.push((await call('kdb:subscribe', 'order')).success)
+    expect(subs.filter(Boolean).length).toBeLessThan(200)
+
+    const popouts: boolean[] = []
+    for (let i = 0; i < 50; i++) {
+      try {
+        checkIpcLimit('window:popout')
+        popouts.push(true)
+      } catch {
+        popouts.push(false)
+      }
+    }
+    expect(popouts.filter(Boolean).length).toBeGreaterThan(0)
+    expect(popouts.filter(Boolean).length).toBeLessThan(50)
   })
 })
 

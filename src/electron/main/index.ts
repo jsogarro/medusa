@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
-import { setupIpcHandlers } from './ipc-handlers'
+import { checkIpcLimit, setupIpcHandlers } from './ipc-handlers'
 import { DEV_SERVER_URL, isDevMode, isTrustedSender, isTrustedUrl } from './security'
 
 let mainWindow: BrowserWindow | null = null
@@ -49,6 +49,7 @@ ipcMain.handle('window:popout', (event, widgetId: string, config: any) => {
   if (!isTrustedSender(event as never) || typeof widgetId !== 'string') {
     return Promise.reject(new Error('Untrusted sender'))
   }
+  checkIpcLimit('window:popout')
   config = config ?? {}
   // Restore window bounds from config or use defaults
   const bounds = config.bounds || { x: undefined, y: undefined, width: 800, height: 600 }

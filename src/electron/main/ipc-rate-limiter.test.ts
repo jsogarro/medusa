@@ -49,4 +49,14 @@ describe('IpcRateLimiter', () => {
     limiter.checkLimit('c')
     expect(limiter.getStatus('c').tokens).toBeCloseTo(4)
   })
+
+  it('a backwards clock step neither grants tokens now nor double-refills when the clock catches up', () => {
+    const { limiter, advance } = setup(5, 1)
+    for (let i = 0; i < 5; i++) limiter.checkLimit('c')
+    advance(-10_000)
+    expect(limiter.checkLimit('c')).toBe(false)
+    expect(limiter.getStatus('c').tokens).toBeGreaterThanOrEqual(0)
+    advance(10_000)
+    expect(limiter.checkLimit('c')).toBe(false)
+  })
 })
