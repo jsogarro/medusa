@@ -209,7 +209,54 @@ describe('kdb:placeOrder after a timeout', () => {
   })
 })
 
+describe('kdb:placeOrder outcome once the request has been issued', () => {
+  const place = (reply: () => unknown) => {
+    h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : reply())
+  }
+
+  it.each([
+    ['a reply with no orderId', () => ({ status: 'open' })],
+    ['a null reply', () => null],
+    ['a socket error mid-call', () => {
+      throw new Error('read ECONNRESET')
+    }]
+  ])('treats %s as an unknown outcome and holds an identical resubmit', async (_name, reply) => {
+    place(reply)
+    const r = await call('kdb:placeOrder', order)
+    expect(r).toMatchObject({ success: false, outcomeUnknown: true })
+    place(() => ({ orderId: 'ORD_9' }))
+    const again = await call('kdb:placeOrder', order)
+    expect(again.success).toBe(false)
+    expect(again.outcomeUnknown).toBeUndefined()
+    expect(again.error).toMatch(/outcome unknown/i)
+    expect(placeCalls()).toBe(1)
+  })
+
+  it('keeps a failure that happened before the request was sent a plain failure', async () => {
+    place(() => {
+      throw Object.assign(new Error('Not connected to kdb+'), { name: 'KdbNotConnectedError' })
+    })
+    const r = await call('kdb:placeOrder', order)
+    expect(r.success).toBe(false)
+    expect(r.outcomeUnknown).toBeUndefined()
+    place(() => ({ orderId: 'ORD_9' }))
+    expect((await call('kdb:placeOrder', order)).success).toBe(true)
+  })
+})
+
 describe('kdb:placeOrder in-flight dedupe', () => {
+  it('treats two limit orders that differ only in price as different orders', async () => {
+    let release!: () => void
+    h.placeGate = new Promise<void>((r) => (release = r))
+    const a = call('kdb:placeOrder', order)
+    const b = call('kdb:placeOrder', { ...order, price: order.price + 1 })
+    await new Promise((r) => setTimeout(r, 0))
+    release()
+    h.placeGate = undefined
+    expect([(await a).success, (await b).success]).toEqual([true, true])
+    expect(placeCalls()).toBe(2)
+  })
+
   it('rejects an identical order while the first is still in flight', async () => {
     let release!: () => void
     h.placeGate = new Promise<void>((r) => (release = r))

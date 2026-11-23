@@ -133,6 +133,11 @@ describe('KdbClient', () => {
     }
   )
 
+  it('querying while disconnected throws a distinct not-connected error', async () => {
+    const client = new KdbClient({ host: 'localhost', port: 1 })
+    await expect(client.query('.some.fn', [1])).rejects.toMatchObject({ name: 'KdbNotConnectedError' })
+  })
+
   it('forwards upd events', async () => {
     const client = new KdbClient({ host: 'localhost', port: 1 })
     const seen: unknown[] = []

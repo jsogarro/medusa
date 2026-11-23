@@ -217,23 +217,27 @@ export function setupIpcHandlers(): void {
         throw new Error(`Order rejected by risk module: ${verdict.reason}`)
       }
 
+      // Once the request is issued, anything but "never sent" leaves the outcome unknown:
+      // a timeout, a socket error mid-call and a reply we cannot read all mean it may have been placed.
+      const outcomeUnknown = () => {
+        unknownOutcomes.set(key, Date.now() + UNKNOWN_OUTCOME_HOLD_MS)
+        return { success: false, outcomeUnknown: true, error: UNKNOWN_OUTCOME_MESSAGE }
+      }
+      const args = [
+        sym(order.exchange), sym(order.pair), sym(order.orderType), sym(order.side),
+        fixedLong(order.price), fixedLong(order.quantity)
+      ]
       let result: unknown
       try {
-        result = await rdbClient.query('.exchange.coordinator.placeOrder', [
-          sym(order.exchange), sym(order.pair), sym(order.orderType), sym(order.side),
-          fixedLong(order.price), fixedLong(order.quantity)
-        ])
+        result = await rdbClient.query('.exchange.coordinator.placeOrder', args)
       } catch (error: any) {
-        if (error?.name === 'KdbTimeoutError') {
-          unknownOutcomes.set(key, Date.now() + UNKNOWN_OUTCOME_HOLD_MS)
-          return { success: false, outcomeUnknown: true, error: UNKNOWN_OUTCOME_MESSAGE }
-        }
-        throw error
+        if (error?.name === 'KdbNotConnectedError') throw error
+        return outcomeUnknown()
+      }
+      if (typeof result !== 'object' || result === null || typeof (result as any).orderId !== 'string') {
+        return outcomeUnknown()
       }
       unknownOutcomes.delete(key)
-      if (typeof result !== 'object' || result === null || typeof (result as any).orderId !== 'string') {
-        throw new Error('Order placement returned no order id')
-      }
       const { orderId, status } = result as { orderId: string; status?: string }
       return { success: true, data: { orderId, status } }
     } finally {

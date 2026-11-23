@@ -9,6 +9,11 @@ export class KdbTimeoutError extends Error {
   override name = 'KdbTimeoutError'
 }
 
+/** Thrown before anything was sent, so the call provably had no effect on the q side. */
+export class KdbNotConnectedError extends Error {
+  override name = 'KdbNotConnectedError'
+}
+
 export interface KdbConfig {
   host: string
   port: number
@@ -159,7 +164,7 @@ export class KdbClient extends EventEmitter {
 
   async query<T = any>(funcOrExpr: string, args?: any[]): Promise<T> {
     if (!this.connection) {
-      throw new Error('Not connected to kdb+')
+      throw new KdbNotConnectedError('Not connected to kdb+')
     }
 
     return await new Promise<T>((resolve, reject) => {
