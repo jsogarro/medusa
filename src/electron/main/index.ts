@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { checkIpcLimit, setupIpcHandlers } from './ipc-handlers'
+import { isValidSymbolLink } from './validation'
 import { DEV_SERVER_URL, isDevMode, isTrustedSender, isTrustedUrl } from './security'
 
 let mainWindow: BrowserWindow | null = null
@@ -109,9 +110,10 @@ ipcMain.handle('window:popout', (event, widgetId: string, config: any) => {
 
 // Symbol link cross-window IPC
 ipcMain.on('symbolLink:changed', (event, color: string, symbol: string, exchange: string) => {
-  if (!isTrustedSender(event as never)) return
+  if (!isTrustedSender(event as never) || !isValidSymbolLink(color, symbol, exchange)) return
   // Broadcast to ALL BrowserWindows
   BrowserWindow.getAllWindows().forEach((win) => {
+    if (win.isDestroyed()) return
     win.webContents.send('symbolLink:update', color, symbol, exchange)
   })
 })

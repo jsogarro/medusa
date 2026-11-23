@@ -128,3 +128,16 @@ export function validateKdbConfig(
     rdb: validateEndpoint(c.rdb, 'rdb', allowedHosts)
   }
 }
+
+const LINK_COLORS = ['red', 'blue', 'green', 'yellow', 'none']
+const SAFE_LINK_SYMBOL = /^[A-Za-z0-9_/.:-]{1,64}$/
+const SAFE_LINK_EXCHANGE = /^[A-Za-z0-9_.-]{1,64}$/
+
+/** Cross-window symbol link payloads come from a renderer; forward only well-formed ones. */
+export function isValidSymbolLink(color: unknown, symbol: unknown, exchange: unknown): boolean {
+  return (
+    typeof color === 'string' && LINK_COLORS.includes(color) &&
+    typeof symbol === 'string' && SAFE_LINK_SYMBOL.test(symbol) &&
+    typeof exchange === 'string' && SAFE_LINK_EXCHANGE.test(exchange)
+  )
+}

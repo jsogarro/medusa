@@ -77,3 +77,33 @@ describe('window:popout', () => {
     expect(made).toBeLessThan(30)
   })
 })
+
+describe('symbolLink:changed', () => {
+  const changed = (...args: unknown[]) => h.listeners.get('symbolLink:changed')!({ ...TRUSTED }, ...args)
+  const sends = (w: any) => w.webContents.send.mock.calls.filter((c: any[]) => c[0] === 'symbolLink:update')
+
+  it('broadcasts a valid change to live windows and skips destroyed ones without throwing', () => {
+    const live = new (h.windows[0].constructor as any)()
+    const dead = new (h.windows[0].constructor as any)()
+    dead.destroyed = true
+    dead.webContents.send.mockImplementation(() => {
+      throw new Error('Object has been destroyed')
+    })
+    expect(() => changed('red', 'BTC/USD', 'alpaca')).not.toThrow()
+    expect(sends(live)).toEqual([['symbolLink:update', 'red', 'BTC/USD', 'alpaca']])
+    expect(dead.webContents.send).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['purple', 'BTC/USD', 'alpaca'],
+    ['red', 'BTC USD;', 'alpaca'],
+    ['red', 'x'.repeat(100), 'alpaca'],
+    ['red', 'BTC/USD', '<script>'],
+    ['red', 42, 'alpaca'],
+    [undefined, undefined, undefined]
+  ])('drops an invalid payload %j', (...args) => {
+    const w = new (h.windows[0].constructor as any)()
+    changed(...args)
+    expect(sends(w)).toEqual([])
+  })
+})
