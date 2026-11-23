@@ -4,11 +4,12 @@
 //! reconnection with exponential backoff, deduplicates trades, and publishes
 //! to the Tickerplant.
 
-use crate::deduplicator::TradeDeduplicator;
+use crate::deduplicator::{trade_key, TradeDeduplicator};
 use crate::exchange_adapter::{
-    BitstampTradeAdapter, CoinbaseTradeAdapter, KrakenTradeAdapter, TradeAdapter,
+    BitstampTradeAdapter, CoinbaseTradeAdapter, KrakenTradeAdapter, NormalizedTrade, TradeAdapter,
 };
 use anyhow::{Context, Result};
+use exchange_connector::types::Trade;
 use futures_util::{SinkExt, StreamExt};
 use gds_common::{ExchangeConfig, ExponentialBackoff, HealthMonitor, KdbPublisher};
 use std::sync::Arc;
@@ -27,7 +28,13 @@ pub struct TradeSubscriber {
     deduplicator: TradeDeduplicator,
     adapter: Arc<dyn TradeAdapter>,
     backfill_enabled: bool,
+    /// Trades sent (or still to be sent) but not yet confirmed by the Tickerplant.
+    /// They are resent with the next batch and recorded as seen only once confirmed.
+    pending: Vec<Trade>,
 }
+
+/// Unconfirmed trades kept for resending; beyond this the oldest are dropped.
+const MAX_PENDING: usize = 10_000;
 
 impl TradeSubscriber {
     /// Create a new trade subscriber
@@ -52,6 +59,7 @@ impl TradeSubscriber {
             deduplicator: TradeDeduplicator::default(),
             adapter,
             backfill_enabled,
+            pending: Vec::new(),
         })
     }
 
@@ -141,16 +149,18 @@ impl TradeSubscriber {
         }
 
         // Process messages
-        while let Some(msg_result) = read.next().await {
-            // Check health
-            if self.health_monitor.is_stale() {
+        loop {
+            // Bound the wait by the health deadline: a feed that goes silent
+            // never yields a message to check staleness against.
+            let Ok(next) = time::timeout(self.health_monitor.remaining(), read.next()).await else {
                 warn!(
                     "[{}] Connection stale (no data for {:?}), reconnecting",
                     self.exchange_name(),
                     self.health_monitor.timeout()
                 );
                 return Err(anyhow::anyhow!("Connection stale"));
-            }
+            };
+            let Some(msg_result) = next else { break };
 
             match msg_result {
                 Ok(Message::Text(text)) => {
@@ -178,43 +188,64 @@ impl TradeSubscriber {
     /// Process a WebSocket message
     async fn process_message(&mut self, text: &str) {
         match self.adapter.parse_message(text) {
-            Ok(trades) => {
-                for normalized_trade in trades {
-                    // Deduplicate
-                    if self.deduplicator.is_duplicate(&normalized_trade.trade_id) {
-                        debug!(
-                            "[{}] Duplicate trade: {}",
-                            self.exchange_name(),
-                            normalized_trade.trade_id
-                        );
-                        continue;
-                    }
-
-                    // Record and publish
-                    self.deduplicator.record(&normalized_trade.trade_id);
-
-                    let trade = normalized_trade.into_trade();
-                    if let Err(e) = self.publisher.publish_trade(&trade).await {
-                        error!(
-                            "[{}] Failed to publish trade {}: {}",
-                            self.exchange_name(),
-                            trade.id,
-                            e
-                        );
-                    } else {
-                        debug!(
-                            "[{}] Published trade: {} @ {} x {}",
-                            self.exchange_name(),
-                            trade.id,
-                            trade.price,
-                            trade.quantity
-                        );
-                    }
-                }
-            }
+            Ok(trades) => self.publish_confirmed(trades).await,
             Err(e) => {
                 // Not all messages are trades, so this is often expected
                 debug!("[{}] Failed to parse message: {}", self.exchange_name(), e);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_seen(&self, symbol: &str, id: &str) -> bool {
+        self.deduplicator
+            .is_duplicate(&trade_key(&self.config.name, symbol, id))
+    }
+
+    /// Queue new trades and publish everything unconfirmed. A trade is recorded as
+    /// seen only once the Tickerplant has confirmed the batch; otherwise it stays
+    /// queued and goes out again with the next batch.
+    async fn publish_confirmed(&mut self, trades: Vec<NormalizedTrade>) {
+        for normalized_trade in trades {
+            let trade = normalized_trade.into_trade();
+            let key = trade_key(&trade.exchange, &trade.pair, &trade.id);
+            if self.deduplicator.is_duplicate(&key)
+                || self
+                    .pending
+                    .iter()
+                    .any(|p| trade_key(&p.exchange, &p.pair, &p.id) == key)
+            {
+                debug!("[{}] Duplicate trade: {}", self.exchange_name(), trade.id);
+                continue;
+            }
+            self.pending.push(trade);
+        }
+        if self.pending.is_empty() {
+            return;
+        }
+        match self.publisher.publish_trades_confirmed(&self.pending).await {
+            Ok(()) => {
+                for trade in self.pending.drain(..) {
+                    self.deduplicator
+                        .record(&trade_key(&trade.exchange, &trade.pair, &trade.id));
+                }
+            }
+            Err(e) => {
+                error!(
+                    "[{}] Failed to publish {} trades, will resend: {}",
+                    self.exchange_name(),
+                    self.pending.len(),
+                    e
+                );
+                if self.pending.len() > MAX_PENDING {
+                    let excess = self.pending.len() - MAX_PENDING;
+                    warn!(
+                        "[{}] Dropping {} oldest unconfirmed trades",
+                        self.exchange_name(),
+                        excess
+                    );
+                    self.pending.drain(..excess);
+                }
             }
         }
     }
@@ -223,7 +254,8 @@ impl TradeSubscriber {
     async fn backfill_trades(&mut self) -> Result<()> {
         info!("[{}] Backfilling recent trades", self.exchange_name());
 
-        for symbol in &self.config.symbols {
+        let symbols = self.config.symbols.clone();
+        for symbol in &symbols {
             match self
                 .adapter
                 .fetch_recent_trades(symbol, 100)
@@ -243,23 +275,7 @@ impl TradeSubscriber {
                         symbol
                     );
 
-                    for normalized_trade in trades {
-                        // Deduplicate
-                        if self.deduplicator.is_duplicate(&normalized_trade.trade_id) {
-                            continue;
-                        }
-
-                        self.deduplicator.record(&normalized_trade.trade_id);
-
-                        let trade = normalized_trade.into_trade();
-                        if let Err(e) = self.publisher.publish_trade(&trade).await {
-                            warn!(
-                                "[{}] Failed to publish backfilled trade: {}",
-                                self.exchange_name(),
-                                e
-                            );
-                        }
-                    }
+                    self.publish_confirmed(trades).await;
                 }
                 Err(e) => {
                     warn!("{}", e);
@@ -269,5 +285,229 @@ impl TradeSubscriber {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BITSTAMP_TRADE: &str = r#"{"event":"trade","channel":"live_trades_btcusd","data":{"id":123456,"amount":0.5,"price":50000.0,"type":0,"timestamp":"1640000000"}}"#;
+
+    fn subscriber(tp_port: u16) -> TradeSubscriber {
+        let config = ExchangeConfig {
+            name: "bitstamp".to_string(),
+            ws_url: "ws://127.0.0.1:1".to_string(),
+            rest_url: "http://127.0.0.1:1".to_string(),
+            symbols: vec![],
+            enabled: true,
+        };
+        let publisher = KdbPublisher::lazy("127.0.0.1", tp_port, "", "");
+        TradeSubscriber::new(config, publisher, Duration::from_secs(30), false).unwrap()
+    }
+
+    #[tokio::test]
+    async fn failed_publish_does_not_mark_trade_as_seen() {
+        // Nothing listens on port 1: the publish fails.
+        let mut sub = subscriber(1);
+        sub.process_message(BITSTAMP_TRADE).await;
+        assert!(
+            !sub.is_seen("BTCUSD", "123456"),
+            "a trade that was not published must stay eligible for redelivery"
+        );
+    }
+
+    /// Fake Tickerplant: handshake, then counts async messages and answers every
+    /// sync one with a boolean atom, as q does.
+    async fn serving_tp(port: u16) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asyncs = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = asyncs.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+            }
+            sock.write_all(&[3]).await.unwrap();
+            loop {
+                let mut header = [0u8; 8];
+                if sock.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+                let mut body = vec![0u8; len - 8];
+                if sock.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                if header[1] == 1 {
+                    sock.write_all(&[1, 2, 0, 0, 10, 0, 0, 0, 0xff, 1])
+                        .await
+                        .unwrap();
+                } else {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        (port, asyncs)
+    }
+
+    #[tokio::test]
+    async fn successful_publish_marks_trade_as_seen() {
+        let (port, _asyncs) = serving_tp(0).await;
+        let mut sub = subscriber(port);
+        sub.process_message(BITSTAMP_TRADE).await;
+        assert!(sub.is_seen("BTCUSD", "123456"));
+    }
+
+    #[tokio::test]
+    async fn trade_written_to_a_dead_tickerplant_is_resent_after_reconnect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Tickerplant that logs the publisher in and then dies: the first async
+        // write still "succeeds", so the trade must not be recorded as seen.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dying = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+            }
+            sock.write_all(&[3]).await.unwrap();
+        });
+        let mut sub = subscriber(port);
+        sub.publisher = KdbPublisher::connect("127.0.0.1", port, "", "")
+            .await
+            .unwrap();
+        dying.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        sub.process_message(BITSTAMP_TRADE).await;
+        assert!(
+            !sub.is_seen("BTCUSD", "123456"),
+            "a trade the tickerplant never confirmed must not be recorded as seen"
+        );
+
+        // The tickerplant comes back: the unconfirmed trade goes out again with the next one.
+        let (_, asyncs) = serving_tp(port).await;
+        let next = BITSTAMP_TRADE.replace("123456", "123457");
+        sub.process_message(&next).await;
+        assert_eq!(asyncs.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(sub.is_seen("BTCUSD", "123456"));
+        assert!(sub.is_seen("BTCUSD", "123457"));
+    }
+
+    #[tokio::test]
+    async fn reconnects_when_server_goes_silent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // Scripted exchange: complete the handshake, then never send a frame.
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                if let Ok(ws) = tokio_tungstenite::accept_async(sock).await {
+                    held.push(ws);
+                    let _ = tx.send(());
+                }
+            }
+        });
+
+        let config = ExchangeConfig {
+            name: "bitstamp".to_string(),
+            ws_url: format!("ws://127.0.0.1:{}", port),
+            rest_url: "http://127.0.0.1:1".to_string(),
+            symbols: vec![],
+            enabled: true,
+        };
+        let publisher = KdbPublisher::lazy("127.0.0.1", 1, "", "");
+        let mut sub =
+            TradeSubscriber::new(config, publisher, Duration::from_millis(200), false).unwrap();
+        let run = tokio::spawn(async move { sub.run().await });
+
+        rx.recv().await.expect("first connection");
+        let second = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        run.abort();
+        assert!(
+            matches!(second, Ok(Some(()))),
+            "a feed that goes silent must be treated as a lost connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_trade_id_on_different_symbols_is_not_a_duplicate() {
+        let (port, asyncs) = serving_tp(0).await;
+        let mut sub = subscriber(port);
+        sub.process_message(BITSTAMP_TRADE).await;
+        sub.process_message(&BITSTAMP_TRADE.replace("btcusd", "ethusd"))
+            .await;
+        assert_eq!(asyncs.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(sub.is_seen("BTCUSD", "123456"));
+        assert!(sub.is_seen("ETHUSD", "123456"));
+    }
+
+    /// Adapter whose REST backfill returns one fixed trade.
+    struct BackfillAdapter;
+
+    #[async_trait::async_trait]
+    impl TradeAdapter for BackfillAdapter {
+        fn exchange_name(&self) -> &str {
+            "bitstamp"
+        }
+        fn build_subscribe_message(&self, _symbols: &[String]) -> String {
+            String::new()
+        }
+        fn parse_message(&self, _text: &str) -> Result<Vec<NormalizedTrade>> {
+            Ok(vec![])
+        }
+        async fn fetch_recent_trades(
+            &self,
+            symbol: &str,
+            _limit: usize,
+        ) -> Result<Vec<NormalizedTrade>> {
+            Ok(vec![NormalizedTrade {
+                exchange: "bitstamp".to_string(),
+                symbol: symbol.to_string(),
+                trade_id: "900".to_string(),
+                price: 100.0,
+                quantity: 1.0,
+                side: exchange_connector::types::Side::Buy,
+                timestamp: chrono::Utc::now(),
+            }])
+        }
+    }
+
+    fn backfilling_subscriber(tp_port: u16) -> TradeSubscriber {
+        let mut sub = subscriber(tp_port);
+        sub.config.symbols = vec!["BTCUSD".to_string()];
+        sub.adapter = Arc::new(BackfillAdapter);
+        sub
+    }
+
+    #[tokio::test]
+    async fn backfilled_trade_is_not_seen_when_the_publish_fails() {
+        let mut sub = backfilling_subscriber(1);
+        sub.backfill_trades().await.unwrap();
+        assert!(!sub.is_seen("BTCUSD", "900"));
+    }
+
+    #[tokio::test]
+    async fn backfilled_trade_is_seen_once_published() {
+        let (port, asyncs) = serving_tp(0).await;
+        let mut sub = backfilling_subscriber(port);
+        sub.backfill_trades().await.unwrap();
+        assert_eq!(asyncs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(sub.is_seen("BTCUSD", "900"));
     }
 }

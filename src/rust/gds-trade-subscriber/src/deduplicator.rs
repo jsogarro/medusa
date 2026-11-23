@@ -5,6 +5,12 @@
 
 use std::collections::{HashSet, VecDeque};
 
+/// Dedup key for a trade. Kraken and Binance ids are per book, so the id alone
+/// would let one symbol's trade hide another's.
+pub fn trade_key(exchange: &str, symbol: &str, id: &str) -> String {
+    format!("{exchange}\u{1f}{symbol}\u{1f}{id}")
+}
+
 /// Sliding window deduplicator for trade IDs.
 ///
 /// Maintains a FIFO queue of the last N trade IDs and a HashSet for O(1) lookup.

@@ -15,8 +15,7 @@ Exchange APIs → exchange-connector → exchange-daemon → kdb-ipc → Tickerp
 ## Features
 
 - Connects to kdb+ Tickerplant on startup
-- Initializes orderbook schema in kdb+
-- Publishes mock orderbook data (Wave 3 testing only)
+- Defines no tables and publishes no data (the GDS subscribers publish; the schema lives on the q side)
 - Handles SIGTERM/SIGINT for graceful shutdown
 - Connection retry with exponential backoff
 
@@ -26,8 +25,7 @@ Exchange APIs → exchange-connector → exchange-daemon → kdb-ipc → Tickerp
 exchange-daemon \
   --kdb-host localhost \
   --kdb-port 5010 \
-  --kdb-user myuser \
-  --publish-interval 5
+  --kdb-user myuser
 ```
 
 ### Arguments
@@ -37,7 +35,6 @@ exchange-daemon \
 | `--kdb-host` | `localhost` | kdb+ Tickerplant host |
 | `--kdb-port` | `5001` | kdb+ Tickerplant port |
 | `--kdb-user` | `""` | kdb+ username (empty for no auth) |
-| `--publish-interval` | `5` | Mock data publish interval (seconds) |
 
 ### Environment Variables
 

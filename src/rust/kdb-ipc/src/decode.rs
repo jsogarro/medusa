@@ -42,7 +42,12 @@ impl Decoder {
         }
 
         let _msg_type = self.cursor.read_u8()?;
-        let _compression = self.cursor.read_u8()?;
+        let compression = self.cursor.read_u8()?;
+        if compression != 0 {
+            return Err(KdbError::InvalidMessage(
+                "Compressed messages are not supported".to_string(),
+            ));
+        }
         let _reserved = self.cursor.read_u8()?;
         let _total_length = self.cursor.read_u32::<LittleEndian>()?;
 
@@ -62,7 +67,10 @@ impl Decoder {
 
         self.depth += 1;
         let type_code = self.cursor.read_i8()?;
-        let _attr = self.cursor.read_u8()?;
+        // Only vectors and tables carry an attribute byte; atoms and dicts do not.
+        if type_code >= 0 && type_code != 99 {
+            let _attr = self.cursor.read_u8()?;
+        }
 
         let result = match KType::from_i8(type_code) {
             Some(KType::Bool) => self.decode_bool_atom(),
@@ -350,7 +358,6 @@ impl Decoder {
                 dict_type
             )));
         }
-        let _dict_attr = self.cursor.read_u8()?;
 
         // Decode keys (symbol list of column names)
         let keys = self.decode_object()?;
@@ -568,5 +575,22 @@ mod tests {
         let mut dec = Decoder::new(encoded);
         let decoded = dec.decode_message().unwrap();
         assert_eq!(obj, decoded);
+    }
+
+    #[test]
+    fn test_decode_q_response_atom() {
+        // `2+2` answered by q 4.1: header + long atom with no attribute byte.
+        let mut msg = vec![1, 2, 0, 0, 17, 0, 0, 0, 0xf9, 4, 0, 0, 0, 0, 0, 0, 0];
+        let mut dec = Decoder::new(std::mem::take(&mut msg));
+        assert_eq!(dec.decode_message().unwrap(), KObject::Long(4));
+    }
+
+    #[test]
+    fn test_compressed_message_is_rejected() {
+        let mut enc = Encoder::new();
+        let mut msg = enc.encode_sync(&KObject::Int(42)).unwrap();
+        msg[2] = 1; // header says payload is compressed
+        let mut dec = Decoder::new(msg);
+        assert!(dec.decode_message().is_err());
     }
 }

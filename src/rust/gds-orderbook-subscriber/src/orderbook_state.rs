@@ -52,7 +52,7 @@ impl ManagedOrderbook {
         self.sequence = sequence;
     }
 
-    /// Apply a delta update (incremental change)
+    /// Apply a delta whose ids are strictly contiguous (`first == last`).
     ///
     /// Returns Ok(()) if successful, Err if sequence gap detected.
     pub fn apply_delta(
@@ -61,13 +61,39 @@ impl ManagedOrderbook {
         asks: Vec<[f64; 2]>,
         sequence: u64,
     ) -> Result<()> {
-        // Check sequence number (validate all deltas, including first after snapshot)
-        if sequence != self.sequence + 1 {
-            return Err(anyhow::anyhow!(
-                "Sequence gap: expected {}, got {}",
-                self.sequence + 1,
-                sequence
-            ));
+        self.apply_update(bids, asks, Some(sequence), sequence)
+    }
+
+    /// Apply an incremental update covering ids `first..=last`.
+    ///
+    /// * `first = Some(U)` (Binance): updates entirely before the book (`last <=
+    ///   book.sequence`) are dropped; `U > book.sequence + 1` is a true gap (Err);
+    ///   otherwise the update applies.
+    /// * `first = None` (Bitstamp/Coinbase/Kraken): ids are timestamps or counters
+    ///   with no per-symbol contiguity, so only ordering is checked and older
+    ///   updates are dropped.
+    pub fn apply_update(
+        &mut self,
+        bids: Vec<[f64; 2]>,
+        asks: Vec<[f64; 2]>,
+        first: Option<u64>,
+        last: u64,
+    ) -> Result<()> {
+        match first {
+            Some(first) => {
+                if last <= self.sequence {
+                    return Ok(());
+                }
+                if first > self.sequence + 1 {
+                    return Err(anyhow::anyhow!(
+                        "Sequence gap: expected {}, got {}",
+                        self.sequence + 1,
+                        first
+                    ));
+                }
+            }
+            None if last < self.sequence => return Ok(()),
+            None => {}
         }
 
         // Apply bid updates
@@ -90,7 +116,21 @@ impl ManagedOrderbook {
             }
         }
 
-        self.sequence = sequence;
+        self.sequence = last;
+
+        // Venue-independent safety net: a crossed book is corrupt however the
+        // venue numbers its updates. The caller re-bootstraps on Err.
+        if let (Some((&bid, _)), Some((&ask, _))) =
+            (self.bids.iter().next_back(), self.asks.iter().next())
+        {
+            if bid >= ask {
+                return Err(anyhow::anyhow!(
+                    "Crossed book: best bid {} >= best ask {}",
+                    key_to_price(bid),
+                    key_to_price(ask)
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -197,6 +237,21 @@ impl OrderbookState {
     ) -> Result<()> {
         let book = self.get_or_create(symbol);
         book.apply_delta(bids, asks, sequence)
+            .context(format!("Failed to apply delta for {}", symbol))
+    }
+
+    /// Apply an update covering ids `first..=last` to a symbol (see
+    /// [`ManagedOrderbook::apply_update`])
+    pub fn apply_update(
+        &mut self,
+        symbol: &str,
+        bids: Vec<[f64; 2]>,
+        asks: Vec<[f64; 2]>,
+        first: Option<u64>,
+        last: u64,
+    ) -> Result<()> {
+        let book = self.get_or_create(symbol);
+        book.apply_update(bids, asks, first, last)
             .context(format!("Failed to apply delta for {}", symbol))
     }
 
@@ -358,5 +413,85 @@ mod tests {
         let ob = snapshot.unwrap();
         assert_eq!(ob.bids.len(), 0);
         assert_eq!(ob.asks.len(), 0);
+    }
+
+    #[test]
+    fn test_non_contiguous_ids_are_not_gaps() {
+        // Bitstamp/Coinbase/Kraken ids are timestamps or counters: only ordering is meaningful.
+        let mut state = OrderbookState::new();
+        state.apply_snapshot("BTCUSD", vec![[50000.0, 1.0]], vec![[50001.0, 1.0]], 1_000);
+
+        let r = state.apply_update(
+            "BTCUSD",
+            vec![[49999.0, 2.0]],
+            vec![],
+            None,
+            1_700_000_000_000_000,
+        );
+        assert!(r.is_ok());
+        assert_eq!(state.get("BTCUSD").unwrap().bids.len(), 2);
+        assert_eq!(state.get("BTCUSD").unwrap().sequence, 1_700_000_000_000_000);
+
+        // A stale (older) update is dropped, not applied and not a gap.
+        let r = state.apply_update(
+            "BTCUSD",
+            vec![[49999.0, 0.0]],
+            vec![],
+            None,
+            1_600_000_000_000_000,
+        );
+        assert!(r.is_ok());
+        assert_eq!(state.get("BTCUSD").unwrap().bids.len(), 2);
+    }
+
+    #[test]
+    fn test_binance_update_id_range_rule() {
+        let mut state = OrderbookState::new();
+        state.apply_snapshot("BTCUSD", vec![[50000.0, 1.0]], vec![[50001.0, 1.0]], 100);
+
+        // Entirely before the snapshot (u <= lastUpdateId): dropped, not applied.
+        assert!(state
+            .apply_update("BTCUSD", vec![[1.0, 1.0]], vec![], Some(90), 100)
+            .is_ok());
+        assert_eq!(state.get("BTCUSD").unwrap().bids.len(), 1);
+
+        // U <= last+1 <= u: applied even though U != last+1 (range straddles).
+        assert!(state
+            .apply_update("BTCUSD", vec![[49999.0, 1.0]], vec![], Some(98), 105)
+            .is_ok());
+        assert_eq!(state.get("BTCUSD").unwrap().sequence, 105);
+
+        // U > last+1: a true gap.
+        assert!(state
+            .apply_update("BTCUSD", vec![], vec![], Some(107), 110)
+            .is_err());
+        assert_eq!(state.get("BTCUSD").unwrap().sequence, 105);
+
+        // Contiguous continuation applies.
+        assert!(state
+            .apply_update("BTCUSD", vec![], vec![], Some(106), 110)
+            .is_ok());
+        assert_eq!(state.get("BTCUSD").unwrap().sequence, 110);
+    }
+
+    #[test]
+    fn test_update_that_crosses_the_book_is_an_error() {
+        for first in [None, Some(11)] {
+            let mut book = ManagedOrderbook::new();
+            book.apply_snapshot(vec![[100.0, 1.0]], vec![[101.0, 1.0]], 10);
+            // A bid at the best ask: the book is corrupt, whatever the venue's ids say.
+            assert!(book
+                .apply_update(vec![[101.0, 1.0]], vec![], first, 11)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn test_one_sided_book_is_not_crossed() {
+        let mut book = ManagedOrderbook::new();
+        book.apply_snapshot(vec![[100.0, 1.0]], vec![], 10);
+        assert!(book
+            .apply_update(vec![[100.5, 1.0]], vec![], None, 11)
+            .is_ok());
     }
 }

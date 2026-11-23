@@ -5,15 +5,13 @@
 //! # Architecture
 //! Long-running daemon that:
 //! 1. Connects to kdb+ Tickerplant via IPC
-//! 2. Initializes orderbook schema
-//! 3. Publishes mock orderbook data (Wave 3 - testing only)
-//! 4. Handles graceful shutdown on SIGTERM/SIGINT
+//! 2. Handles graceful shutdown on SIGTERM/SIGINT
+//!
+//! It defines no tables and publishes no data; the GDS subscribers publish.
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use kdb_ipc::KdbClient;
-use std::time::Duration;
-use tokio::time;
 use tracing::{error, info};
 
 #[derive(Parser, Debug)]
@@ -31,10 +29,6 @@ struct Args {
     /// kdb+ username (empty for no auth)
     #[arg(long, default_value = "")]
     kdb_user: String,
-
-    /// Mock data publish interval (seconds)
-    #[arg(long, default_value = "5")]
-    publish_interval: u64,
 }
 
 #[tokio::main]
@@ -56,99 +50,28 @@ async fn main() -> Result<()> {
     info!("Connecting to kdb+ at {}:{}", args.kdb_host, args.kdb_port);
 
     // Connect to kdb+ Tickerplant
-    let mut client =
-        KdbClient::connect(&args.kdb_host, args.kdb_port, &args.kdb_user, &kdb_password)
-            .await
-            .context("Failed to connect to kdb+")?;
-
-    // Initialize schema
-    info!("Initializing orderbook schema");
-    initialize_schema(&mut client)
+    let client = KdbClient::connect(&args.kdb_host, args.kdb_port, &args.kdb_user, &kdb_password)
         .await
-        .context("Failed to initialize schema")?;
+        .context("Failed to connect to kdb+")?;
+    run(client, wait_for_shutdown()).await
+}
 
-    // Start mock data publisher
-    info!(
-        "Starting mock orderbook publisher (interval: {}s)",
-        args.publish_interval
-    );
-    let publish_handle = tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(args.publish_interval));
-        let mut seq = 0u64;
-
-        loop {
-            interval.tick().await;
-
-            match publish_mock_orderbook(&mut client, seq).await {
-                Ok(_) => {
-                    seq += 1;
-                    info!("Published mock orderbook (seq: {})", seq);
-                }
-                Err(e) => {
-                    error!("Failed to publish orderbook: {}", e);
-                }
-            }
-        }
-    });
-
+/// Hold the Tickerplant connection until `shutdown` resolves.
+///
+/// The daemon publishes nothing itself: market data reaches the Tickerplant
+/// through the GDS subscribers, and the schema is owned by the q side.
+async fn run(
+    _client: KdbClient,
+    shutdown: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
     info!("Exchange daemon running — waiting for shutdown signal");
 
-    // Wait for shutdown
-    match wait_for_shutdown().await {
+    match shutdown.await {
         Ok(_) => info!("Received shutdown signal"),
         Err(e) => error!("Error waiting for shutdown: {}", e),
     }
 
-    // Cancel publisher
-    publish_handle.abort();
-
     info!("Exchange daemon stopped");
-    Ok(())
-}
-
-/// Initialize orderbook schema in kdb+
-async fn initialize_schema(client: &mut KdbClient) -> Result<()> {
-    // Create orderbook table with columns:
-    // sym, exchange, side, price, quantity, timestamp
-    let schema_query = r#"
-        orderbook:([]
-            sym:`symbol$();
-            exchange:`symbol$();
-            side:`symbol$();
-            price:`float$();
-            quantity:`float$();
-            timestamp:`timestamp$()
-        )
-    "#;
-
-    client
-        .query(schema_query)
-        .await
-        .context("Failed to create orderbook table")?;
-
-    info!("Schema initialized successfully");
-    Ok(())
-}
-
-/// Publish mock orderbook data to kdb+
-async fn publish_mock_orderbook(client: &mut KdbClient, _seq: u64) -> Result<()> {
-    // Mock data: BTC-USD orderbook with 3 levels
-    let insert_query = r#"
-        `orderbook insert (
-            `BTCUSD`BTCUSD`BTCUSD`BTCUSD`BTCUSD`BTCUSD;
-            `coinbase`coinbase`coinbase`coinbase`coinbase`coinbase;
-            `bid`bid`bid`ask`ask`ask;
-            50000.0 49999.5 49999.0 50001.0 50001.5 50002.0;
-            1.5 2.3 3.1 1.2 1.8 2.5;
-            6#.z.p
-        )
-    "#;
-
-    client
-        .query(insert_query)
-        .await
-        .context("Failed to insert orderbook data")?;
-
     Ok(())
 }
 
@@ -182,4 +105,48 @@ async fn wait_for_shutdown() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time;
+
+    /// A Tickerplant stand-in that completes the handshake and returns how many
+    /// bytes the daemon sent it afterwards.
+    #[tokio::test]
+    async fn daemon_sends_nothing_to_the_tickerplant() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tp = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+            }
+            sock.write_all(&[3]).await.unwrap();
+            let mut received = Vec::new();
+            let _ = sock.read_to_end(&mut received).await;
+            received.len()
+        });
+
+        let client = KdbClient::connect("127.0.0.1", port, "", "").await.unwrap();
+        run(client, async {
+            time::sleep(Duration::from_millis(300)).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tp.await.unwrap(),
+            0,
+            "the daemon must not define tables or publish quotes of its own"
+        );
+    }
 }

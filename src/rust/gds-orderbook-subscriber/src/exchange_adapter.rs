@@ -23,8 +23,14 @@ pub enum ExchangeMessage {
         symbol: String,
         bids: Vec<[f64; 2]>,
         asks: Vec<[f64; 2]>,
+        /// First update id covered (Binance `U`); `None` when the venue's ids
+        /// are timestamps/counters with no per-symbol contiguity to check.
+        first_sequence: Option<u64>,
         sequence: u64,
     },
+    /// The venue's per-connection message numbering skipped a message: the book
+    /// can no longer be trusted and the connection must be re-established.
+    Gap,
     /// Heartbeat/ping message
     Heartbeat,
     /// Other message types (ignored)
@@ -125,6 +131,7 @@ impl ExchangeAdapter for BitstampAdapter {
                     symbol,
                     bids,
                     asks,
+                    first_sequence: None,
                     sequence,
                 })
             }
@@ -192,6 +199,8 @@ pub struct CoinbaseAdapter {
     rest_url: String,
     #[allow(dead_code)]
     use_advanced: bool,
+    /// Last `sequence_num` seen on this connection (adapters are built per connection).
+    last_seq: std::sync::Mutex<Option<u64>>,
 }
 
 impl CoinbaseAdapter {
@@ -204,6 +213,7 @@ impl CoinbaseAdapter {
         Self {
             rest_url,
             use_advanced,
+            last_seq: Default::default(),
         }
     }
 }
@@ -236,6 +246,17 @@ impl ExchangeAdapter for CoinbaseAdapter {
         let msg: serde_json::Value = serde_json::from_str(text)?;
 
         if self.use_advanced {
+            // `sequence_num` numbers every message on the connection, so any
+            // skipped number means a dropped update.
+            if let Some(n) = msg.get("sequence_num").and_then(|s| s.as_u64()) {
+                let mut last = self.last_seq.lock().unwrap_or_else(|e| e.into_inner());
+                let gap = matches!(*last, Some(prev) if n != prev + 1);
+                *last = Some(n);
+                if gap {
+                    return Ok(ExchangeMessage::Gap);
+                }
+            }
+
             // Advanced Trade API format
             let channel = msg.get("channel").and_then(|c| c.as_str());
 
@@ -287,6 +308,7 @@ impl ExchangeAdapter for CoinbaseAdapter {
                             symbol,
                             bids,
                             asks,
+                            first_sequence: None,
                             sequence,
                         })
                     }
@@ -348,6 +370,7 @@ impl ExchangeAdapter for CoinbaseAdapter {
                         symbol,
                         bids,
                         asks,
+                        first_sequence: None,
                         sequence,
                     })
                 }
@@ -533,6 +556,7 @@ impl ExchangeAdapter for KrakenAdapter {
                     symbol,
                     bids,
                     asks,
+                    first_sequence: None,
                     sequence,
                 }),
                 _ => Ok(ExchangeMessage::Other),
@@ -710,6 +734,7 @@ impl ExchangeAdapter for BinanceAdapter {
             symbol,
             bids: bids_parsed?,
             asks: asks_parsed?,
+            first_sequence: msg.get("U").and_then(|u| u.as_u64()),
             sequence,
         })
     }
@@ -831,6 +856,7 @@ mod tests {
                 bids,
                 asks,
                 sequence,
+                ..
             } => {
                 assert_eq!(symbol, "BTC/USD");
                 assert_eq!(bids.len(), 1);
@@ -972,6 +998,7 @@ mod tests {
                 bids,
                 asks,
                 sequence,
+                ..
             } => {
                 assert_eq!(symbol, "BTC/USD");
                 assert_eq!(bids.len(), 3);
@@ -1000,6 +1027,7 @@ mod tests {
         let adapter = CoinbaseAdapter {
             rest_url: "https://api.exchange.coinbase.com".to_string(),
             use_advanced: true,
+            last_seq: Default::default(),
         };
 
         let json = r#"{
@@ -1025,6 +1053,7 @@ mod tests {
                 bids,
                 asks,
                 sequence,
+                ..
             } => {
                 assert_eq!(symbol, "BTC-USD");
                 assert_eq!(bids.len(), 2);
@@ -1042,6 +1071,7 @@ mod tests {
         let adapter = CoinbaseAdapter {
             rest_url: "https://api.exchange.coinbase.com".to_string(),
             use_advanced: true,
+            last_seq: Default::default(),
         };
 
         let json = r#"{
@@ -1065,6 +1095,7 @@ mod tests {
                 bids,
                 asks,
                 sequence,
+                ..
             } => {
                 assert_eq!(symbol, "BTC-USD");
                 assert_eq!(bids.len(), 1);
@@ -1082,6 +1113,7 @@ mod tests {
         let adapter = CoinbaseAdapter {
             rest_url: "https://api.exchange.coinbase.com".to_string(),
             use_advanced: true,
+            last_seq: Default::default(),
         };
         let msg = adapter.build_subscribe_message(&["BTC-USD".to_string()]);
 
@@ -1122,6 +1154,7 @@ mod tests {
             symbol: "BTC/USD".to_string(),
             bids: vec![[67000.0, 0.8]], // Updated quantity
             asks: vec![[67003.0, 0.5]], // New level
+            first_sequence: None,
             sequence: 101,
         };
 
@@ -1200,5 +1233,82 @@ mod tests {
             }
             _ => panic!("Expected Delta message"),
         }
+    }
+
+    #[test]
+    fn test_only_binance_deltas_carry_a_first_update_id() {
+        let binance = BinanceAdapter::new("https://api.binance.com".to_string())
+            .parse_message(r#"{"e":"depthUpdate","s":"BTCUSDT","U":98,"u":105,"b":[],"a":[]}"#)
+            .unwrap();
+        match binance {
+            ExchangeMessage::Delta {
+                first_sequence,
+                sequence,
+                ..
+            } => {
+                assert_eq!(first_sequence, Some(98));
+                assert_eq!(sequence, 105);
+            }
+            _ => panic!("Expected Delta message"),
+        }
+
+        let bitstamp = BitstampAdapter::new("https://www.bitstamp.net/api/v2".to_string())
+            .parse_message(
+                r#"{"event":"data","channel":"diff_order_book_btcusd","data":{"microtimestamp":"1700000000000000","bids":[],"asks":[]}}"#,
+            )
+            .unwrap();
+        assert!(matches!(
+            bitstamp,
+            ExchangeMessage::Delta {
+                first_sequence: None,
+                ..
+            }
+        ));
+    }
+    fn coinbase_l2(seq: u64) -> String {
+        format!(
+            r#"{{"channel":"l2_data","sequence_num":{seq},"events":[{{"type":"update","product_id":"BTC-USD","updates":[{{"side":"bid","price_level":"67000.00","new_quantity":"0.8"}}]}}]}}"#
+        )
+    }
+
+    #[test]
+    fn test_coinbase_advanced_sequence_num_jump_is_a_gap() {
+        let adapter = CoinbaseAdapter {
+            rest_url: String::new(),
+            use_advanced: true,
+            last_seq: Default::default(),
+        };
+        // First message seen sets the baseline; contiguous ones pass.
+        assert!(matches!(
+            adapter.parse_message(&coinbase_l2(10)).unwrap(),
+            ExchangeMessage::Delta { .. }
+        ));
+        assert!(matches!(
+            adapter.parse_message(&coinbase_l2(11)).unwrap(),
+            ExchangeMessage::Delta { .. }
+        ));
+        // 12 was dropped.
+        assert!(matches!(
+            adapter.parse_message(&coinbase_l2(13)).unwrap(),
+            ExchangeMessage::Gap
+        ));
+    }
+
+    #[test]
+    fn test_coinbase_advanced_other_channel_messages_count_toward_contiguity() {
+        let adapter = CoinbaseAdapter {
+            rest_url: String::new(),
+            use_advanced: true,
+            last_seq: Default::default(),
+        };
+        adapter.parse_message(&coinbase_l2(1)).unwrap();
+        // sequence_num is per connection, so a non-book message occupies a number.
+        adapter
+            .parse_message(r#"{"channel":"subscriptions","sequence_num":2,"events":[]}"#)
+            .unwrap();
+        assert!(matches!(
+            adapter.parse_message(&coinbase_l2(3)).unwrap(),
+            ExchangeMessage::Delta { .. }
+        ));
     }
 }
