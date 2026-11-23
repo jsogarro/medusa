@@ -2,14 +2,16 @@
 //!
 //! REST API documentation: https://www.bitstamp.net/api/
 
-use crate::client::{ExchangeClient, ExchangeError};
+use crate::client::{
+    http_client, ExchangeClient, ExchangeError, MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
+};
 use crate::rate_limiter::RateLimiter;
 use crate::types::{Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::Sha256;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -21,11 +23,6 @@ const BASE_URL: &str = "https://www.bitstamp.net/api/v2";
 
 // Security: Atomic counter for nonce uniqueness
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-// Security: Validation constants for price/quantity bounds
-const MAX_PRICE: f64 = 1_000_000_000.0; // $1B per unit
-const MAX_QUANTITY: f64 = 1_000_000_000.0; // 1B units
-const MIN_POSITIVE: f64 = 1e-18; // 18 decimal places
 
 /// Bitstamp REST client
 ///
@@ -53,6 +50,9 @@ impl std::fmt::Debug for BitstampClient {
     }
 }
 
+/// Order endpoint path and its unauthenticated form fields.
+type OrderEndpoint = (String, Vec<(&'static str, String)>);
+
 impl BitstampClient {
     /// Create a new Bitstamp client
     ///
@@ -65,7 +65,7 @@ impl BitstampClient {
     /// Bitstamp rate limits: 8000 requests per 10 minutes = ~13 req/sec
     pub fn new(api_key: String, api_secret: String, customer_id: String) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_key,
             api_secret,
             customer_id,
@@ -83,6 +83,76 @@ impl BitstampClient {
         mac.update(signature_input.as_bytes());
         mac.update(message.as_bytes());
         hex::encode(mac.finalize().into_bytes()).to_uppercase()
+    }
+
+    /// Build the order endpoint and its (unauthenticated) form fields.
+    fn build_order_request(order: &Order) -> Result<OrderEndpoint, ExchangeError> {
+        let pair = Self::normalize_pair(&order.pair);
+        let endpoint = match (order.side, order.order_type) {
+            (Side::Buy, OrderType::Limit) => format!("/buy/{}/", pair),
+            (Side::Sell, OrderType::Limit) => format!("/sell/{}/", pair),
+            (Side::Buy, OrderType::Market) => format!("/buy/market/{}/", pair),
+            (Side::Sell, OrderType::Market) => format!("/sell/market/{}/", pair),
+            _ => {
+                return Err(ExchangeError::InvalidRequest(format!(
+                    "Unsupported order type: {:?}",
+                    order.order_type
+                )))
+            }
+        };
+
+        let mut fields = vec![("amount", order.quantity.to_string())];
+        if order.order_type == OrderType::Limit {
+            let price = order.price.ok_or_else(|| {
+                ExchangeError::InvalidRequest("Limit order requires price".into())
+            })?;
+            fields.push(("price", price.to_string()));
+        }
+        if let Some(id) = &order.client_order_id {
+            fields.push(("client_order_id", id.clone()));
+        }
+        Ok((endpoint, fields))
+    }
+
+    /// Convert one `open_orders` row. Bitstamp encodes side as "0" (buy) or
+    /// "1" (sell); anything else is an error, not a sell.
+    fn open_order_from(
+        o: BitstampOrderResponse,
+        pair: Option<&str>,
+    ) -> Result<Order, ExchangeError> {
+        let side = match o.side.as_str() {
+            "0" => Side::Buy,
+            "1" => Side::Sell,
+            other => {
+                return Err(ExchangeError::Other(format!(
+                    "Unrecognized Bitstamp order side '{other}'"
+                )))
+            }
+        };
+        let price: f64 = o.price.parse().unwrap_or(0.0);
+        let quantity: f64 = o.amount.parse().unwrap_or(0.0);
+        let created_at = o
+            .datetime
+            .as_ref()
+            .and_then(|dt| DateTime::parse_from_rfc3339(dt).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+
+        Ok(Order {
+            id: Some(o.id),
+            pair: pair.map(String::from).unwrap_or_default(),
+            exchange: "bitstamp".to_string(),
+            side,
+            price: Some(price),
+            quantity,
+            order_type: OrderType::Limit,
+            status: OrderStatus::Open,
+            client_order_id: None,
+            filled_quantity: 0.0,
+            average_price: None,
+            created_at,
+            updated_at: created_at,
+        })
     }
 
     /// Get current nonce with microsecond precision and uniqueness guarantee
@@ -169,14 +239,6 @@ struct BitstampBalance {
     balances: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Serialize)]
-struct BitstampOrderRequest {
-    amount: String,
-    price: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    daily_order: Option<bool>,
-}
-
 #[derive(Debug, Deserialize)]
 struct BitstampOrderResponse {
     id: String,
@@ -261,11 +323,12 @@ impl ExchangeClient for BitstampClient {
 
     async fn get_balance(&self, asset: Option<&str>) -> Result<Vec<Balance>, ExchangeError> {
         let url = format!("{}/balance/", BASE_URL);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/balance"), 1).await;
         let nonce = Self::get_nonce();
         let signature = self.generate_signature(nonce, "");
 
         trace!("Fetching Bitstamp balance");
-        self.rate_limiter.acquire(Some("/balance"), 1).await;
 
         let response = self
             .client
@@ -340,11 +403,12 @@ impl ExchangeClient for BitstampClient {
             format!("{}/open_orders/all/", BASE_URL)
         };
 
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/open_orders"), 1).await;
         let nonce = Self::get_nonce();
         let signature = self.generate_signature(nonce, "");
 
         trace!("Fetching Bitstamp open orders");
-        self.rate_limiter.acquire(Some("/open_orders"), 1).await;
 
         let response = self
             .client
@@ -368,34 +432,8 @@ impl ExchangeClient for BitstampClient {
 
         let orders = data
             .into_iter()
-            .map(|o| {
-                let side = if o.side == "0" { Side::Buy } else { Side::Sell };
-                let price: f64 = o.price.parse().unwrap_or(0.0);
-                let quantity: f64 = o.amount.parse().unwrap_or(0.0);
-                let created_at = o
-                    .datetime
-                    .as_ref()
-                    .and_then(|dt| DateTime::parse_from_rfc3339(dt).ok())
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(Utc::now);
-
-                Order {
-                    id: Some(o.id),
-                    pair: pair.map(String::from).unwrap_or_default(),
-                    exchange: "bitstamp".to_string(),
-                    side,
-                    price: Some(price),
-                    quantity,
-                    order_type: OrderType::Limit,
-                    status: OrderStatus::Open,
-                    client_order_id: None,
-                    filled_quantity: 0.0,
-                    average_price: None,
-                    created_at,
-                    updated_at: created_at,
-                }
-            })
-            .collect();
+            .map(|o| Self::open_order_from(o, pair))
+            .collect::<Result<Vec<_>, ExchangeError>>()?;
 
         Ok(orders)
     }
@@ -411,47 +449,26 @@ impl ExchangeClient for BitstampClient {
     }
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
-        let normalized_pair = Self::normalize_pair(&order.pair);
-        let endpoint = match (order.side, order.order_type) {
-            (Side::Buy, OrderType::Limit) => format!("/buy/{}/", normalized_pair),
-            (Side::Sell, OrderType::Limit) => format!("/sell/{}/", normalized_pair),
-            (Side::Buy, OrderType::Market) => format!("/buy/market/{}/", normalized_pair),
-            (Side::Sell, OrderType::Market) => format!("/sell/market/{}/", normalized_pair),
-            _ => {
-                return Err(ExchangeError::InvalidRequest(format!(
-                    "Unsupported order type: {:?}",
-                    order.order_type
-                )))
-            }
-        };
-
+        crate::client::validate_order(order)?;
+        let (endpoint, order_fields) = Self::build_order_request(order)?;
         let url = format!("{}{}", BASE_URL, endpoint);
-        let nonce = Self::get_nonce();
-        let signature = self.generate_signature(nonce, "");
-
-        let request_body = BitstampOrderRequest {
-            amount: order.quantity.to_string(),
-            price: order.price.map(|p| p.to_string()),
-            daily_order: None,
-        };
 
         debug!(
             "Placing Bitstamp order: {:?} {} {} @ {:?}",
             order.side, order.quantity, order.pair, order.price
         );
+        // Wait for the limiter before minting the nonce that gets signed.
         self.rate_limiter.acquire(Some(&endpoint), 1).await;
 
+        let nonce = Self::get_nonce();
+        let signature = self.generate_signature(nonce, "");
         let nonce_str = nonce.to_string();
         let mut form_data = vec![
-            ("key", self.api_key.as_str()),
-            ("signature", &signature),
-            ("nonce", &nonce_str),
-            ("amount", &request_body.amount),
+            ("key", self.api_key.clone()),
+            ("signature", signature),
+            ("nonce", nonce_str),
         ];
-
-        if let Some(ref price) = request_body.price {
-            form_data.push(("price", price));
-        }
+        form_data.extend(order_fields);
 
         let response = self.client.post(&url).form(&form_data).send().await?;
 
@@ -469,11 +486,12 @@ impl ExchangeClient for BitstampClient {
 
     async fn cancel_order(&self, order_id: &str) -> Result<(), ExchangeError> {
         let url = format!("{}/cancel_order/", BASE_URL);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/cancel_order"), 1).await;
         let nonce = Self::get_nonce();
         let signature = self.generate_signature(nonce, "");
 
         debug!("Cancelling Bitstamp order: {}", order_id);
-        self.rate_limiter.acquire(Some("/cancel_order"), 1).await;
 
         let response = self
             .client
@@ -507,13 +525,14 @@ impl ExchangeClient for BitstampClient {
             format!("{}/cancel_all_orders/", BASE_URL)
         };
 
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter
+            .acquire(Some("/cancel_all_orders"), 1)
+            .await;
         let nonce = Self::get_nonce();
         let signature = self.generate_signature(nonce, "");
 
         debug!("Cancelling all Bitstamp orders for {:?}", pair);
-        self.rate_limiter
-            .acquire(Some("/cancel_all_orders"), 1)
-            .await;
 
         let response = self
             .client
@@ -570,4 +589,88 @@ mod tests {
     }
 
     // Note: Real API tests require credentials and should be run manually or in CI with test credentials
+
+    #[tokio::test]
+    async fn place_order_rejects_invalid_orders_bitstamp() {
+        let client = BitstampClient::new("k".into(), "s".into(), "c".into());
+        crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
+
+    fn find<'a>(p: &'a [(&'static str, String)], k: &str) -> Option<&'a str> {
+        p.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn build_order_request_carries_client_order_id() {
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            ..crate::client::tests::sample_order()
+        };
+        let (endpoint, f) = BitstampClient::build_order_request(&order).unwrap();
+        assert_eq!(endpoint, "/buy/btcusd/");
+        assert_eq!(find(&f, "client_order_id"), Some("my-id-1"));
+        assert_eq!(find(&f, "amount"), Some("1"));
+        assert_eq!(find(&f, "price"), Some("50000"));
+    }
+
+    #[test]
+    fn build_order_request_market_has_no_price_or_client_id() {
+        let order = Order {
+            order_type: OrderType::Market,
+            side: Side::Sell,
+            ..crate::client::tests::sample_order()
+        };
+        let (endpoint, f) = BitstampClient::build_order_request(&order).unwrap();
+        assert_eq!(endpoint, "/sell/market/btcusd/");
+        assert_eq!(find(&f, "price"), None);
+        assert_eq!(find(&f, "client_order_id"), None);
+    }
+
+    fn open_row(side: &str) -> BitstampOrderResponse {
+        serde_json::from_value(serde_json::json!({
+            "id": "1", "type": side, "price": "50000", "amount": "1"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn open_order_from_rejects_unknown_side() {
+        let buy = BitstampClient::open_order_from(open_row("0"), None).unwrap();
+        let sell = BitstampClient::open_order_from(open_row("1"), None).unwrap();
+        assert_eq!((buy.side, sell.side), (Side::Buy, Side::Sell));
+        assert!(BitstampClient::open_order_from(open_row("2"), None).is_err());
+        assert!(BitstampClient::open_order_from(open_row(""), None).is_err());
+    }
+
+    /// A request queued behind the rate limiter must not have taken (and
+    /// signed) its nonce yet, or it would reach the venue out of order.
+    #[tokio::test]
+    async fn queued_signed_requests_take_no_nonce_until_released() {
+        use std::time::Duration;
+        let c = BitstampClient::new("k".into(), "s".into(), "c".into());
+        for ep in [
+            "/balance",
+            "/open_orders",
+            "/cancel_order",
+            "/cancel_all_orders",
+        ] {
+            c.rate_limiter.set_endpoint_limit(ep, 1).await;
+            while c.rate_limiter.try_acquire(Some(ep), 1).await {}
+        }
+        let before = NONCE_COUNTER.load(Ordering::Acquire);
+        let wait = Duration::from_millis(50);
+        assert!(tokio::time::timeout(wait, c.get_balance(None))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.get_open_orders(None))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.cancel_order("1"))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.cancel_all_orders(None))
+            .await
+            .is_err());
+        assert_eq!(NONCE_COUNTER.load(Ordering::Acquire), before);
+    }
 }

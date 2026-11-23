@@ -2,7 +2,10 @@
 //!
 //! REST API documentation: https://docs.kraken.com/rest/
 
-use crate::client::{ExchangeClient, ExchangeError};
+use crate::client::{
+    http_client, parse_order_type, parse_side, unknown_status, ExchangeClient, ExchangeError,
+    MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
+};
 use crate::rate_limiter::RateLimiter;
 use crate::types::{Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side};
 use async_trait::async_trait;
@@ -23,11 +26,6 @@ const BASE_URL: &str = "https://api.kraken.com";
 
 // Security: Atomic counter for nonce uniqueness
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-// Security: Validation constants
-const MAX_PRICE: f64 = 1_000_000_000.0;
-const MAX_QUANTITY: f64 = 1_000_000_000.0;
-const MIN_POSITIVE: f64 = 1e-18;
 
 /// Kraken exchange client
 ///
@@ -64,7 +62,7 @@ impl KrakenClient {
     /// Kraken: 15 requests/sec for Tier 2, 20 for Tier 3 (using conservative 10/sec)
     pub fn new(api_key: String, api_secret: String) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_key,
             api_secret,
             rate_limiter: Arc::new(RateLimiter::new(10, None)),
@@ -100,6 +98,68 @@ impl KrakenClient {
         let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
         Ok(signature)
+    }
+
+    /// Convert one open-order row; an unknown side or type is an error.
+    fn open_order_from(order_id: String, info: KrakenOrderInfo) -> Result<Order, ExchangeError> {
+        let side = parse_side(&info.descr.side)?;
+        let order_type = parse_order_type(&info.descr.ordertype)?;
+        let status = match info.status.as_str() {
+            "open" => OrderStatus::Open,
+            "pending" => OrderStatus::Pending,
+            other => return Err(unknown_status(other)),
+        };
+
+        Ok(Order {
+            id: Some(order_id),
+            pair: info.descr.pair.clone(),
+            exchange: "kraken".to_string(),
+            side,
+            price: info.descr.price.parse().ok(),
+            quantity: info.vol.parse().unwrap_or(0.0),
+            order_type,
+            status,
+            client_order_id: None,
+            filled_quantity: info.vol_exec.parse().unwrap_or(0.0),
+            average_price: None,
+            created_at: DateTime::from_timestamp(info.opentm as i64, 0).unwrap_or_else(Utc::now),
+            updated_at: Utc::now(),
+        })
+    }
+
+    /// Build the `AddOrder` form fields (without signature).
+    fn build_order_form(
+        order: &Order,
+        nonce: u64,
+    ) -> Result<Vec<(&'static str, String)>, ExchangeError> {
+        let order_type = match order.order_type {
+            OrderType::Limit => "limit",
+            OrderType::Market => "market",
+            _ => {
+                return Err(ExchangeError::InvalidRequest(
+                    "Unsupported order type".into(),
+                ))
+            }
+        };
+        let side = match order.side {
+            Side::Buy => "buy",
+            Side::Sell => "sell",
+        };
+
+        let mut form = vec![
+            ("nonce", nonce.to_string()),
+            ("ordertype", order_type.to_string()),
+            ("type", side.to_string()),
+            ("pair", Self::normalize_pair(&order.pair)),
+            ("volume", order.quantity.to_string()),
+        ];
+        if let Some(price) = order.price {
+            form.push(("price", price.to_string()));
+        }
+        if let Some(id) = &order.client_order_id {
+            form.push(("cl_ord_id", id.clone()));
+        }
+        Ok(form)
     }
 
     /// Get current nonce with microsecond precision and uniqueness guarantee
@@ -215,7 +275,6 @@ struct KrakenOrderInfo {
     descr: KrakenOrderDescr,
     vol: String,
     vol_exec: String,
-    #[allow(dead_code)]
     status: String,
     opentm: f64,
 }
@@ -319,13 +378,14 @@ impl ExchangeClient for KrakenClient {
     async fn get_balance(&self, asset: Option<&str>) -> Result<Vec<Balance>, ExchangeError> {
         let path = "/0/private/Balance";
         let url = format!("{}{}", BASE_URL, path);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/Balance"), 1).await;
         let nonce = Self::get_nonce();
         let postdata = format!("nonce={}", nonce);
 
         let signature = self.generate_signature(path, nonce, &postdata)?;
 
         trace!("Fetching Kraken balance");
-        self.rate_limiter.acquire(Some("/Balance"), 1).await;
 
         let response = self
             .client
@@ -384,13 +444,14 @@ impl ExchangeClient for KrakenClient {
     async fn get_open_orders(&self, _pair: Option<&str>) -> Result<Vec<Order>, ExchangeError> {
         let path = "/0/private/OpenOrders";
         let url = format!("{}{}", BASE_URL, path);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/OpenOrders"), 1).await;
         let nonce = Self::get_nonce();
         let postdata = format!("nonce={}", nonce);
 
         let signature = self.generate_signature(path, nonce, &postdata)?;
 
         trace!("Fetching Kraken open orders");
-        self.rate_limiter.acquire(Some("/OpenOrders"), 1).await;
 
         let response = self
             .client
@@ -425,36 +486,8 @@ impl ExchangeClient for KrakenClient {
         let orders = result
             .open
             .into_iter()
-            .map(|(order_id, info)| {
-                let side = if info.descr.side == "buy" {
-                    Side::Buy
-                } else {
-                    Side::Sell
-                };
-                let order_type = match info.descr.ordertype.as_str() {
-                    "limit" => OrderType::Limit,
-                    "market" => OrderType::Market,
-                    _ => OrderType::Limit,
-                };
-
-                Order {
-                    id: Some(order_id),
-                    pair: info.descr.pair.clone(),
-                    exchange: "kraken".to_string(),
-                    side,
-                    price: info.descr.price.parse().ok(),
-                    quantity: info.vol.parse().unwrap_or(0.0),
-                    order_type,
-                    status: OrderStatus::Open,
-                    client_order_id: None,
-                    filled_quantity: info.vol_exec.parse().unwrap_or(0.0),
-                    average_price: None,
-                    created_at: DateTime::from_timestamp(info.opentm as i64, 0)
-                        .unwrap_or_else(Utc::now),
-                    updated_at: Utc::now(),
-                }
-            })
-            .collect();
+            .map(|(order_id, info)| Self::open_order_from(order_id, info))
+            .collect::<Result<Vec<_>, ExchangeError>>()?;
 
         Ok(orders)
     }
@@ -469,37 +502,20 @@ impl ExchangeClient for KrakenClient {
     }
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
+        crate::client::validate_order(order)?;
         let path = "/0/private/AddOrder";
         let url = format!("{}{}", BASE_URL, path);
+
+        // Wait for the limiter before minting the nonce that gets signed, so
+        // nonces reach Kraken in the order they were issued.
+        debug!(
+            "Placing Kraken order: {:?} {} {} @ {:?}",
+            order.side, order.quantity, order.pair, order.price
+        );
+        self.rate_limiter.acquire(Some("/AddOrder"), 1).await;
+
         let nonce = Self::get_nonce();
-
-        let order_type = match order.order_type {
-            OrderType::Limit => "limit",
-            OrderType::Market => "market",
-            _ => {
-                return Err(ExchangeError::InvalidRequest(
-                    "Unsupported order type".into(),
-                ))
-            }
-        };
-
-        let side = match order.side {
-            Side::Buy => "buy",
-            Side::Sell => "sell",
-        };
-
-        let mut form_data = vec![
-            ("nonce", nonce.to_string()),
-            ("ordertype", order_type.to_string()),
-            ("type", side.to_string()),
-            ("pair", Self::normalize_pair(&order.pair)),
-            ("volume", order.quantity.to_string()),
-        ];
-
-        if let Some(price) = order.price {
-            form_data.push(("price", price.to_string()));
-        }
-
+        let form_data = Self::build_order_form(order, nonce)?;
         let postdata = form_data
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
@@ -507,12 +523,6 @@ impl ExchangeClient for KrakenClient {
             .join("&");
 
         let signature = self.generate_signature(path, nonce, &postdata)?;
-
-        debug!(
-            "Placing Kraken order: {:?} {} {} @ {:?}",
-            order.side, order.quantity, order.pair, order.price
-        );
-        self.rate_limiter.acquire(Some("/AddOrder"), 1).await;
 
         let response = self
             .client
@@ -554,13 +564,14 @@ impl ExchangeClient for KrakenClient {
     async fn cancel_order(&self, order_id: &str) -> Result<(), ExchangeError> {
         let path = "/0/private/CancelOrder";
         let url = format!("{}{}", BASE_URL, path);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/CancelOrder"), 1).await;
         let nonce = Self::get_nonce();
         let postdata = format!("nonce={}&txid={}", nonce, order_id);
 
         let signature = self.generate_signature(path, nonce, &postdata)?;
 
         debug!("Cancelling Kraken order: {}", order_id);
-        self.rate_limiter.acquire(Some("/CancelOrder"), 1).await;
 
         let response = self
             .client
@@ -625,5 +636,95 @@ mod tests {
 
         let err = KrakenClient::parse_error(400, r#"{"error": ["EFunding:Insufficient funds"]}"#);
         assert!(matches!(err, ExchangeError::InsufficientBalance(_)));
+    }
+
+    #[tokio::test]
+    async fn place_order_rejects_invalid_orders_kraken() {
+        let client = KrakenClient::new("k".into(), "c2VjcmV0".into());
+        crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
+
+    fn find<'a>(p: &'a [(&'static str, String)], k: &str) -> Option<&'a str> {
+        p.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn build_order_form_carries_client_order_id() {
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            side: Side::Sell,
+            ..crate::client::tests::sample_order()
+        };
+        let f = KrakenClient::build_order_form(&order, 77).unwrap();
+        assert_eq!(find(&f, "cl_ord_id"), Some("my-id-1"));
+        assert_eq!(find(&f, "type"), Some("sell"));
+        assert_eq!(find(&f, "ordertype"), Some("limit"));
+        assert_eq!(find(&f, "volume"), Some("1"));
+        assert_eq!(find(&f, "nonce"), Some("77"));
+    }
+
+    #[test]
+    fn build_order_form_without_client_id_omits_field() {
+        let f = KrakenClient::build_order_form(&crate::client::tests::sample_order(), 1).unwrap();
+        assert_eq!(find(&f, "cl_ord_id"), None);
+    }
+
+    fn open_info(side: &str, ty: &str) -> KrakenOrderInfo {
+        open_info_with_status(side, ty, "open")
+    }
+
+    fn open_info_with_status(side: &str, ty: &str, status: &str) -> KrakenOrderInfo {
+        serde_json::from_value(serde_json::json!({
+            "descr": {"pair": "XBTUSD", "type": side, "ordertype": ty, "price": "50000"},
+            "vol": "1", "vol_exec": "0", "status": status, "opentm": 1_700_000_000.0
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn open_order_from_rejects_unknown_side_or_type() {
+        let ok = KrakenClient::open_order_from("O1".into(), open_info("sell", "market")).unwrap();
+        assert_eq!((ok.side, ok.order_type), (Side::Sell, OrderType::Market));
+        assert!(KrakenClient::open_order_from("O1".into(), open_info("short", "limit")).is_err());
+        assert!(KrakenClient::open_order_from("O1".into(), open_info("buy", "stop-loss")).is_err());
+    }
+
+    #[test]
+    fn open_order_from_maps_status_and_rejects_unknown() {
+        let pending = KrakenClient::open_order_from(
+            "O1".into(),
+            open_info_with_status("buy", "limit", "pending"),
+        )
+        .unwrap();
+        assert_eq!(pending.status, OrderStatus::Pending);
+        assert!(KrakenClient::open_order_from(
+            "O1".into(),
+            open_info_with_status("buy", "limit", "closed")
+        )
+        .is_err());
+    }
+
+    /// A request queued behind the rate limiter must not have taken (and
+    /// signed) its nonce yet, or it would reach the venue out of order.
+    #[tokio::test]
+    async fn queued_signed_requests_take_no_nonce_until_released() {
+        use std::time::Duration;
+        let c = KrakenClient::new("k".into(), "c2VjcmV0".into());
+        for ep in ["/Balance", "/OpenOrders", "/CancelOrder"] {
+            c.rate_limiter.set_endpoint_limit(ep, 1).await;
+            while c.rate_limiter.try_acquire(Some(ep), 1).await {}
+        }
+        let before = NONCE_COUNTER.load(Ordering::Acquire);
+        let wait = Duration::from_millis(50);
+        assert!(tokio::time::timeout(wait, c.get_balance(None))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.get_open_orders(None))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.cancel_order("O1"))
+            .await
+            .is_err());
+        assert_eq!(NONCE_COUNTER.load(Ordering::Acquire), before);
     }
 }

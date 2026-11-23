@@ -100,7 +100,7 @@ impl AlpacaClient {
         };
 
         Self {
-            client: Client::new(),
+            client: crate::client::http_client(),
             base_url,
             data_url: MARKET_DATA_URL.to_string(),
             api_key,
@@ -484,42 +484,20 @@ impl ExchangeClient for AlpacaClient {
         };
 
         // Convert to common Order type
-        Ok(filtered_orders
+        filtered_orders
             .into_iter()
             .map(|o| self.convert_order(o))
-            .collect())
+            .collect()
     }
 
     async fn get_order(&self, order_id: &str) -> Result<Order, ExchangeError> {
         let alpaca_order = self.get_order_by_id(order_id).await?;
-        Ok(self.convert_order(alpaca_order))
+        self.convert_order(alpaca_order)
     }
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
-        let req = OrderRequest {
-            symbol: order.pair.clone(),
-            qty: Some(order.quantity.to_string()),
-            notional: None,
-            side: match order.side {
-                Side::Buy => "buy".to_string(),
-                Side::Sell => "sell".to_string(),
-            },
-            order_type: match order.order_type {
-                OrderType::Market => "market".to_string(),
-                OrderType::Limit => "limit".to_string(),
-                _ => {
-                    return Err(ExchangeError::InvalidRequest(
-                        "Unsupported order type for Alpaca".to_string(),
-                    ))
-                }
-            },
-            time_in_force: "day".to_string(),
-            limit_price: order.price.map(|p| p.to_string()),
-            stop_price: None,
-            extended_hours: Some(false),
-            client_order_id: order.client_order_id.clone(),
-        };
-
+        crate::client::validate_order(order)?;
+        let req = Self::build_order_request(order)?;
         let alpaca_order = self.submit_order(req).await?;
         Ok(alpaca_order.id)
     }
@@ -545,8 +523,37 @@ impl ExchangeClient for AlpacaClient {
 }
 
 impl AlpacaClient {
+    /// Build the `POST /v2/orders` body.
+    fn build_order_request(order: &Order) -> Result<OrderRequest, ExchangeError> {
+        Ok(OrderRequest {
+            symbol: order.pair.clone(),
+            qty: Some(order.quantity.to_string()),
+            notional: None,
+            side: match order.side {
+                Side::Buy => "buy".to_string(),
+                Side::Sell => "sell".to_string(),
+            },
+            order_type: match order.order_type {
+                OrderType::Market => "market".to_string(),
+                OrderType::Limit => "limit".to_string(),
+                _ => {
+                    return Err(ExchangeError::InvalidRequest(
+                        "Unsupported order type for Alpaca".to_string(),
+                    ))
+                }
+            },
+            time_in_force: "day".to_string(),
+            limit_price: order.price.map(|p| p.to_string()),
+            stop_price: None,
+            extended_hours: Some(false),
+            client_order_id: order.client_order_id.clone(),
+        })
+    }
+}
+
+impl AlpacaClient {
     /// Convert Alpaca Order to common Order type
-    fn convert_order(&self, alpaca_order: types::Order) -> Order {
+    fn convert_order(&self, alpaca_order: types::Order) -> Result<Order, ExchangeError> {
         let status = match alpaca_order.status.as_str() {
             "accepted" | "new" => OrderStatus::Open,
             "pending_new" => OrderStatus::Pending,
@@ -555,27 +562,18 @@ impl AlpacaClient {
             "canceled" => OrderStatus::Cancelled,
             "rejected" => OrderStatus::Rejected,
             "expired" => OrderStatus::Expired,
-            _ => OrderStatus::Pending,
+            other => return Err(crate::client::unknown_status(other)),
         };
 
-        let order_type = match alpaca_order.order_type.as_str() {
-            "market" => OrderType::Market,
-            "limit" => OrderType::Limit,
-            _ => OrderType::Market,
-        };
-
-        let side = match alpaca_order.side.as_str() {
-            "buy" => Side::Buy,
-            "sell" => Side::Sell,
-            _ => Side::Buy,
-        };
+        let order_type = crate::client::parse_order_type(&alpaca_order.order_type)?;
+        let side = crate::client::parse_side(&alpaca_order.side)?;
 
         let filled_qty: f64 = alpaca_order.filled_qty.parse().unwrap_or(0.0);
         let avg_price: Option<f64> = alpaca_order
             .filled_avg_price
             .and_then(|p: String| p.parse::<f64>().ok());
 
-        Order {
+        Ok(Order {
             id: Some(alpaca_order.id),
             pair: alpaca_order.symbol,
             exchange: "alpaca".to_string(),
@@ -594,7 +592,7 @@ impl AlpacaClient {
             average_price: avg_price,
             created_at: Utc::now(), // TODO: Parse alpaca_order.created_at
             updated_at: Utc::now(), // TODO: Parse alpaca_order.updated_at
-        }
+        })
     }
 }
 
@@ -630,5 +628,62 @@ mod tests {
             result.unwrap_err(),
             ExchangeError::Authentication(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn place_order_rejects_invalid_orders_alpaca() {
+        let client = AlpacaClient::new("k".into(), "s".into(), true);
+        crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
+
+    #[test]
+    fn build_order_request_forwards_client_order_id() {
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            ..crate::client::tests::sample_order()
+        };
+        let req = AlpacaClient::build_order_request(&order).unwrap();
+        assert_eq!(req.client_order_id.as_deref(), Some("my-id-1"));
+        assert_eq!(req.limit_price.as_deref(), Some("50000"));
+    }
+
+    fn alpaca_order(status: &str, side: &str, order_type: &str) -> types::Order {
+        serde_json::from_value(serde_json::json!({
+            "id": "abc123",
+            "client_order_id": "c1",
+            "created_at": "2026-01-15T10:30:00Z",
+            "asset_id": "asset123",
+            "symbol": "AAPL",
+            "asset_class": "us_equity",
+            "qty": "100",
+            "filled_qty": "0",
+            "type": order_type,
+            "side": side,
+            "time_in_force": "day",
+            "status": status,
+            "extended_hours": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn convert_order_does_not_default_unknown_fields() {
+        let client = AlpacaClient::new("k".into(), "s".into(), true);
+        let ok = client
+            .convert_order(alpaca_order("filled", "sell", "limit"))
+            .unwrap();
+        assert_eq!(ok.status, OrderStatus::Filled);
+        assert_eq!(ok.side, Side::Sell);
+
+        assert!(client
+            .convert_order(alpaca_order("pending_cancel", "buy", "market"))
+            .is_err());
+
+        assert!(client
+            .convert_order(alpaca_order("new", "short", "limit"))
+            .is_err());
+        assert!(client
+            .convert_order(alpaca_order("new", "buy", "stop_limit"))
+            .is_err());
     }
 }

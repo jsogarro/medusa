@@ -2,7 +2,10 @@
 //!
 //! REST API documentation: https://binance-docs.github.io/apidocs/spot/en/
 
-use crate::client::{ExchangeClient, ExchangeError};
+use crate::client::{
+    http_client, parse_order_type, parse_side, unknown_status, ExchangeClient, ExchangeError,
+    MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
+};
 use crate::rate_limiter::RateLimiter;
 use crate::types::{Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side};
 use async_trait::async_trait;
@@ -17,11 +20,6 @@ use tracing::{debug, trace};
 type HmacSha256 = Hmac<Sha256>;
 
 const BASE_URL: &str = "https://api.binance.com";
-
-// Security: Validation constants
-const MAX_PRICE: f64 = 1_000_000_000.0;
-const MAX_QUANTITY: f64 = 1_000_000_000.0;
-const MIN_POSITIVE: f64 = 1e-18;
 
 /// Binance exchange client
 ///
@@ -64,7 +62,7 @@ impl BinanceClient {
     /// Binance: 1200 weight/minute (using conservative 15 req/sec = 900/min)
     pub fn new(api_key: String, secret_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_key,
             secret_key,
             rate_limiter: Arc::new(RateLimiter::new(15, None)),
@@ -99,6 +97,75 @@ impl BinanceClient {
         mac.update(query_string.as_bytes());
         let result = mac.finalize();
         hex::encode(result.into_bytes())
+    }
+
+    /// Convert one open-order row; an unknown side or type is an error.
+    fn open_order_from(o: BinanceOrder) -> Result<Order, ExchangeError> {
+        let side = parse_side(&o.side)?;
+        let order_type = parse_order_type(&o.order_type)?;
+        let status = match o.status.as_str() {
+            "NEW" => OrderStatus::Open,
+            "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
+            other => return Err(unknown_status(other)),
+        };
+
+        Ok(Order {
+            id: Some(o.order_id.to_string()),
+            pair: Self::denormalize_pair(&o.symbol),
+            exchange: "binance".to_string(),
+            side,
+            price: o.price.parse().ok(),
+            quantity: o.orig_qty.parse().unwrap_or(0.0),
+            order_type,
+            status,
+            client_order_id: None,
+            filled_quantity: o.executed_qty.parse().unwrap_or(0.0),
+            average_price: None,
+            created_at: DateTime::from_timestamp_millis(o.time as i64).unwrap_or_else(Utc::now),
+            updated_at: DateTime::from_timestamp_millis(o.update_time as i64)
+                .unwrap_or_else(Utc::now),
+        })
+    }
+
+    /// Build the unsigned `POST /api/v3/order` parameters.
+    fn build_order_params(
+        order: &Order,
+        timestamp_ms: u64,
+    ) -> Result<Vec<(&'static str, String)>, ExchangeError> {
+        let order_type = match order.order_type {
+            OrderType::Limit => "LIMIT",
+            OrderType::Market => "MARKET",
+            _ => {
+                return Err(ExchangeError::InvalidRequest(
+                    "Unsupported order type".into(),
+                ))
+            }
+        };
+        let side = match order.side {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        };
+
+        let mut params = vec![
+            ("symbol", Self::normalize_pair(&order.pair)),
+            ("side", side.to_string()),
+            ("type", order_type.to_string()),
+            ("quantity", order.quantity.to_string()),
+            ("timestamp", timestamp_ms.to_string()),
+        ];
+
+        if order.order_type == OrderType::Limit {
+            let price = order.price.ok_or_else(|| {
+                ExchangeError::InvalidRequest("Limit order requires price".into())
+            })?;
+            params.push(("price", price.to_string()));
+            params.push(("timeInForce", "GTC".to_string()));
+        }
+        if let Some(id) = &order.client_order_id {
+            params.push(("newClientOrderId", id.clone()));
+        }
+
+        Ok(params)
     }
 
     /// Get current timestamp in milliseconds
@@ -249,7 +316,6 @@ struct BinanceOrder {
     #[serde(rename = "orderId")]
     order_id: u64,
     symbol: String,
-    #[allow(dead_code)]
     status: String,
     side: String,
     #[serde(rename = "type")]
@@ -451,37 +517,8 @@ impl ExchangeClient for BinanceClient {
 
         let orders = data
             .into_iter()
-            .map(|o| {
-                let side = if o.side == "BUY" {
-                    Side::Buy
-                } else {
-                    Side::Sell
-                };
-                let order_type = match o.order_type.as_str() {
-                    "LIMIT" => OrderType::Limit,
-                    "MARKET" => OrderType::Market,
-                    _ => OrderType::Limit,
-                };
-
-                Order {
-                    id: Some(o.order_id.to_string()),
-                    pair: Self::denormalize_pair(&o.symbol),
-                    exchange: "binance".to_string(),
-                    side,
-                    price: o.price.parse().ok(),
-                    quantity: o.orig_qty.parse().unwrap_or(0.0),
-                    order_type,
-                    status: OrderStatus::Open,
-                    client_order_id: None,
-                    filled_quantity: o.executed_qty.parse().unwrap_or(0.0),
-                    average_price: None,
-                    created_at: DateTime::from_timestamp_millis(o.time as i64)
-                        .unwrap_or_else(Utc::now),
-                    updated_at: DateTime::from_timestamp_millis(o.update_time as i64)
-                        .unwrap_or_else(Utc::now),
-                }
-            })
-            .collect();
+            .map(Self::open_order_from)
+            .collect::<Result<Vec<_>, ExchangeError>>()?;
 
         Ok(orders)
     }
@@ -502,6 +539,7 @@ impl ExchangeClient for BinanceClient {
     }
 
     async fn place_order(&self, order: &Order) -> Result<String, ExchangeError> {
+        crate::client::validate_order(order)?;
         if !self.has_credentials() {
             return Err(ExchangeError::Authentication(
                 "API credentials not configured".into(),
@@ -509,42 +547,10 @@ impl ExchangeClient for BinanceClient {
         }
 
         let url = format!("{}/api/v3/order", BASE_URL);
-        let timestamp = Self::get_timestamp_ms();
 
-        let order_type = match order.order_type {
-            OrderType::Limit => "LIMIT",
-            OrderType::Market => "MARKET",
-            _ => {
-                return Err(ExchangeError::InvalidRequest(
-                    "Unsupported order type".into(),
-                ))
-            }
-        };
-
-        let side = match order.side {
-            Side::Buy => "BUY",
-            Side::Sell => "SELL",
-        };
-
-        let symbol = Self::normalize_pair(&order.pair);
-        let mut params = vec![
-            ("symbol", symbol.clone()),
-            ("side", side.to_string()),
-            ("type", order_type.to_string()),
-            ("quantity", order.quantity.to_string()),
-            ("timestamp", timestamp.to_string()),
-        ];
-
-        if order.order_type == OrderType::Limit {
-            if let Some(price) = order.price {
-                params.push(("price", price.to_string()));
-                params.push(("timeInForce", "GTC".to_string()));
-            } else {
-                return Err(ExchangeError::InvalidRequest(
-                    "Limit order requires price".into(),
-                ));
-            }
-        }
+        // Wait for the limiter before taking the timestamp that gets signed.
+        self.rate_limiter.acquire(Some("/order"), 1).await;
+        let mut params = Self::build_order_params(order, Self::get_timestamp_ms())?;
 
         let query_string = params
             .iter()
@@ -558,7 +564,6 @@ impl ExchangeClient for BinanceClient {
             "Placing Binance order: {:?} {} {} @ {:?}",
             order.side, order.quantity, order.pair, order.price
         );
-        self.rate_limiter.acquire(Some("/order"), 1).await;
 
         let response = self
             .client
@@ -999,5 +1004,77 @@ mod tests {
         assert!(!debug_str.contains("super_secret_key"));
         assert!(!debug_str.contains("super_secret_secret"));
         assert!(debug_str.contains("<redacted>"));
+    }
+
+    #[tokio::test]
+    async fn place_order_rejects_invalid_orders_binance() {
+        let client = BinanceClient::new("k".into(), "s".into());
+        crate::client::tests::assert_place_order_rejects_bad_orders(&client).await;
+    }
+
+    fn find<'a>(p: &'a [(&'static str, String)], k: &str) -> Option<&'a str> {
+        p.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn build_order_params_limit_carries_client_order_id() {
+        let order = Order {
+            client_order_id: Some("my-id-1".into()),
+            ..crate::client::tests::sample_order()
+        };
+        let p = BinanceClient::build_order_params(&order, 123).unwrap();
+        assert_eq!(find(&p, "newClientOrderId"), Some("my-id-1"));
+        assert_eq!(find(&p, "type"), Some("LIMIT"));
+        assert_eq!(find(&p, "price"), Some("50000"));
+        assert_eq!(find(&p, "timeInForce"), Some("GTC"));
+        assert_eq!(find(&p, "timestamp"), Some("123"));
+    }
+
+    #[test]
+    fn build_order_params_without_client_id_or_market_price() {
+        let order = Order {
+            order_type: OrderType::Market,
+            price: None,
+            ..crate::client::tests::sample_order()
+        };
+        let p = BinanceClient::build_order_params(&order, 1).unwrap();
+        assert_eq!(find(&p, "newClientOrderId"), None);
+        assert_eq!(find(&p, "price"), None);
+        assert_eq!(find(&p, "type"), Some("MARKET"));
+    }
+
+    fn open_row(side: &str, ty: &str) -> BinanceOrder {
+        open_row_with_status(side, ty, "NEW")
+    }
+
+    fn open_row_with_status(side: &str, ty: &str, status: &str) -> BinanceOrder {
+        serde_json::from_value(serde_json::json!({
+            "orderId": 7, "symbol": "BTCUSDT", "status": status, "side": side,
+            "type": ty, "price": "50000", "origQty": "1", "executedQty": "0",
+            "time": 1_700_000_000_000u64, "updateTime": 1_700_000_000_000u64
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn open_order_from_rejects_unknown_side_or_type() {
+        let ok = BinanceClient::open_order_from(open_row("SELL", "MARKET")).unwrap();
+        assert_eq!((ok.side, ok.order_type), (Side::Sell, OrderType::Market));
+        assert!(BinanceClient::open_order_from(open_row("SHORT", "LIMIT")).is_err());
+        assert!(BinanceClient::open_order_from(open_row("BUY", "STOP_LOSS_LIMIT")).is_err());
+    }
+
+    #[test]
+    fn open_order_from_maps_status_and_rejects_unknown() {
+        let part = BinanceClient::open_order_from(open_row_with_status(
+            "BUY",
+            "LIMIT",
+            "PARTIALLY_FILLED",
+        ))
+        .unwrap();
+        assert_eq!(part.status, OrderStatus::PartiallyFilled);
+        assert!(
+            BinanceClient::open_order_from(open_row_with_status("BUY", "LIMIT", "FILLED")).is_err()
+        );
     }
 }

@@ -4,8 +4,9 @@
 //! - Exchange API: wss://ws-feed.exchange.coinbase.com
 //! - Advanced Trade: wss://advanced-trade-ws.coinbase.com
 
-use crate::client::ExchangeError;
-use crate::types::{OrderBook, PriceLevel, Side, Trade};
+use crate::client::{parse_side, ExchangeError};
+use crate::feeds::check_trade;
+use crate::types::{OrderBook, PriceLevel, Trade};
 use crate::websocket::{ReconnectConfig, WebSocketClient, WsConfig, WsMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -237,23 +238,15 @@ impl CoinbaseFeed {
 
                 if let Some(event) = msg.events.first() {
                     if let Some(trade) = event.trades.first() {
-                        let timestamp = DateTime::parse_from_rfc3339(&trade.time)
-                            .ok()
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .unwrap_or_else(Utc::now);
+                        let timestamp = parse_time(&trade.time)?;
+                        let side = parse_side(&trade.side)?;
 
-                        let side = if trade.side.to_uppercase() == "BUY" {
-                            Side::Buy
-                        } else {
-                            Side::Sell
-                        };
-
-                        return Ok(Trade {
+                        return check_trade(Trade {
                             id: trade.trade_id.clone(), // String in Advanced Trade
                             pair: trade.product_id.replace('-', "/"),
                             exchange: "coinbase".to_string(),
-                            price: trade.price.parse().unwrap_or(0.0),
-                            quantity: trade.size.parse().unwrap_or(0.0),
+                            price: parse_num("price", &trade.price)?,
+                            quantity: parse_num("size", &trade.size)?,
                             side,
                             timestamp,
                             is_maker: None, // Not provided in Advanced Trade
@@ -273,28 +266,31 @@ impl CoinbaseFeed {
             )));
         }
 
-        let timestamp = DateTime::parse_from_rfc3339(&msg.time)
-            .ok()
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(Utc::now);
+        let timestamp = parse_time(&msg.time)?;
+        let side = parse_side(&msg.side)?;
 
-        let side = if msg.side == "buy" {
-            Side::Buy
-        } else {
-            Side::Sell
-        };
-
-        Ok(Trade {
+        check_trade(Trade {
             id: msg.trade_id.to_string(),
             pair: msg.product_id.replace('-', "/"),
             exchange: "coinbase".to_string(),
-            price: msg.price.parse().unwrap_or(0.0),
-            quantity: msg.size.parse().unwrap_or(0.0),
+            price: parse_num("price", &msg.price)?,
+            quantity: parse_num("size", &msg.size)?,
             side,
             timestamp,
             is_maker: Some(msg.maker_order_id.is_some()),
         })
     }
+}
+
+fn parse_num(name: &str, s: &str) -> Result<f64, ExchangeError> {
+    s.parse()
+        .map_err(|_| ExchangeError::Other(format!("Invalid trade {name}: {s}")))
+}
+
+fn parse_time(s: &str) -> Result<DateTime<Utc>, ExchangeError> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| ExchangeError::Other(format!("Invalid trade time '{s}': {e}")))
 }
 
 // Coinbase WebSocket message types (both Legacy and Advanced Trade)
@@ -373,6 +369,7 @@ struct AdvancedTradeTrade {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Side;
 
     #[test]
     fn test_parse_orderbook_legacy() {
@@ -496,5 +493,42 @@ mod tests {
         assert_eq!(payload["channels"][0], "matches");
         assert_eq!(payload["product_ids"][0], "BTC-USD");
         assert!(payload.get("channel").is_none());
+    }
+
+    fn legacy(side: &str, price: &str, size: &str, time: &str) -> String {
+        format!(
+            r#"{{"type":"match","trade_id":1,"product_id":"BTC-USD","side":"{side}","size":"{size}","price":"{price}","time":"{time}"}}"#
+        )
+    }
+
+    fn advanced(side: &str, price: &str, size: &str, time: &str) -> String {
+        format!(
+            r#"{{"channel":"market_trades","events":[{{"type":"update","trades":[{{"trade_id":"1","product_id":"BTC-USD","price":"{price}","size":"{size}","side":"{side}","time":"{time}"}}]}}]}}"#
+        )
+    }
+
+    #[test]
+    fn parse_trade_rejects_malformed_fields_on_both_formats() {
+        let t = "2024-01-01T00:00:00.000000Z";
+        assert!(CoinbaseFeed::parse_trade(&legacy("sell", "50000", "0.1", t), false).is_ok());
+        assert!(CoinbaseFeed::parse_trade(&advanced("SELL", "50000", "0.1", t), true).is_ok());
+        for (side, price, size, time) in [
+            ("buy", "abc", "0.1", t),
+            ("buy", "50000", "xyz", t),
+            ("buy", "0", "0.1", t),
+            ("buy", "50000", "0", t),
+            ("buy", "NaN", "0.1", t),
+            ("hold", "50000", "0.1", t),
+            ("buy", "50000", "0.1", "yesterday"),
+        ] {
+            assert!(
+                CoinbaseFeed::parse_trade(&legacy(side, price, size, time), false).is_err(),
+                "legacy {side} {price} {size} {time}"
+            );
+            assert!(
+                CoinbaseFeed::parse_trade(&advanced(side, price, size, time), true).is_err(),
+                "advanced {side} {price} {size} {time}"
+            );
+        }
     }
 }

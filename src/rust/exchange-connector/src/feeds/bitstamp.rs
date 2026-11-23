@@ -3,6 +3,7 @@
 //! WebSocket documentation: https://www.bitstamp.net/websocket/v2/
 
 use crate::client::ExchangeError;
+use crate::feeds::check_trade;
 use crate::types::{OrderBook, PriceLevel, Side, Trade};
 use crate::websocket::{ReconnectConfig, WebSocketClient, WsConfig, WsMessage};
 use chrono::{DateTime, Utc};
@@ -192,13 +193,17 @@ impl BitstampFeed {
         let timestamp = DateTime::from_timestamp(data.timestamp, 0).unwrap_or_else(Utc::now);
 
         // Bitstamp trade type: 0 = buy, 1 = sell
-        let side = if data.trade_type == 0 {
-            Side::Buy
-        } else {
-            Side::Sell
+        let side = match data.trade_type {
+            0 => Side::Buy,
+            1 => Side::Sell,
+            other => {
+                return Err(ExchangeError::Other(format!(
+                    "Unrecognized Bitstamp trade type {other}"
+                )))
+            }
         };
 
-        Ok(Trade {
+        check_trade(Trade {
             id: data.id.to_string(),
             pair: normalized_pair,
             exchange: "bitstamp".to_string(),
@@ -292,5 +297,19 @@ mod tests {
         assert_eq!(trade.price, 50000.00);
         assert_eq!(trade.quantity, 0.1);
         assert_eq!(trade.side, Side::Buy);
+    }
+
+    fn bitstamp_trade(price: &str, kind: u8) -> String {
+        format!(
+            r#"{{"event":"trade","channel":"live_trades_btcusd","data":{{"id":1,"timestamp":1640000000,"amount":0.1,"price":{price},"type":{kind}}}}}"#
+        )
+    }
+
+    #[test]
+    fn parse_trade_rejects_bad_price_and_side() {
+        assert!(BitstampFeed::parse_trade(&bitstamp_trade("50000.0", 1)).is_ok());
+        assert!(BitstampFeed::parse_trade(&bitstamp_trade("0.0", 0)).is_err());
+        assert!(BitstampFeed::parse_trade(&bitstamp_trade("-5.0", 0)).is_err());
+        assert!(BitstampFeed::parse_trade(&bitstamp_trade("50000.0", 2)).is_err());
     }
 }

@@ -4,7 +4,7 @@
 //! heartbeat/ping-pong handling, and message dispatch via channels.
 
 use crate::client::ExchangeError;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::{interval, sleep, Instant};
@@ -151,8 +151,19 @@ async fn connection_task(
     let mut current_delay = config.reconnect_config.initial_delay;
 
     loop {
-        match connect_and_run(&config, &mut cmd_rx, &msg_tx).await {
-            Ok(_) => {
+        let outcome = match connect(&config).await {
+            Ok(ws_stream) => {
+                // A connection was established: backoff starts over.
+                attempt = 0;
+                current_delay = config.reconnect_config.initial_delay;
+                let (write, read) = ws_stream.split();
+                run_session(&config, write, read, &mut cmd_rx, &msg_tx).await
+            }
+            Err(e) => Err(e),
+        };
+
+        match outcome {
+            Ok(()) => {
                 info!("WebSocket connection closed normally");
                 break;
             }
@@ -191,12 +202,11 @@ async fn connection_task(
     }
 }
 
-/// Connect to WebSocket and run message loop
-async fn connect_and_run(
-    config: &WsConfig,
-    cmd_rx: &mut mpsc::UnboundedReceiver<Message>,
-    msg_tx: &mpsc::UnboundedSender<WsMessage>,
-) -> Result<(), ExchangeError> {
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Open the connection (TLS only).
+async fn connect(config: &WsConfig) -> Result<WsStream, ExchangeError> {
     debug!("Connecting to WebSocket: {}", config.url);
 
     // Validate URL is wss:// (TLS required)
@@ -211,8 +221,32 @@ async fn connect_and_run(
         .map_err(|e| ExchangeError::Other(format!("WebSocket connection failed: {}", e)))?;
 
     info!("WebSocket connected");
+    Ok(ws_stream)
+}
 
-    let (mut write, mut read) = ws_stream.split();
+/// Run one established session.
+///
+/// Returns `Ok` only when the session was ended on purpose (the caller asked
+/// to close, or dropped its handles). Every other end - server close, stream
+/// end, I/O error, missed pongs - is an `Err` so the caller reconnects.
+async fn run_session<W, R, E>(
+    config: &WsConfig,
+    mut write: W,
+    mut read: R,
+    cmd_rx: &mut mpsc::UnboundedReceiver<Message>,
+    msg_tx: &mpsc::UnboundedSender<WsMessage>,
+) -> Result<(), ExchangeError>
+where
+    W: Sink<Message> + Unpin,
+    W::Error: std::fmt::Display,
+    R: Stream<Item = Result<Message, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    let lost = |why: String| {
+        Err(ExchangeError::Other(format!(
+            "WebSocket connection lost: {why}"
+        )))
+    };
 
     // Heartbeat interval
     let mut heartbeat = interval(config.heartbeat_interval);
@@ -227,26 +261,25 @@ async fn connect_and_run(
                         trace!("Received text: {}", text);
                         if msg_tx.send(WsMessage::Text(text)).is_err() {
                             warn!("Message receiver dropped, closing connection");
-                            break;
+                            return Ok(());
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
                         trace!("Received binary: {} bytes", data.len());
                         if msg_tx.send(WsMessage::Binary(data)).is_err() {
                             warn!("Message receiver dropped, closing connection");
-                            break;
+                            return Ok(());
                         }
                     }
                     Some(Ok(Message::Ping(data))) => {
                         trace!("Received ping");
                         if msg_tx.send(WsMessage::Ping(data.clone())).is_err() {
                             warn!("Message receiver dropped, closing connection");
-                            break;
+                            return Ok(());
                         }
                         // Respond with pong
                         if let Err(e) = write.send(Message::Pong(data)).await {
-                            error!("Failed to send pong: {}", e);
-                            break;
+                            return lost(format!("failed to send pong: {e}"));
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {
@@ -256,16 +289,10 @@ async fn connect_and_run(
                     Some(Ok(Message::Close(_))) => {
                         info!("Server closed connection");
                         let _ = msg_tx.send(WsMessage::Close);
-                        break;
+                        return lost("server closed the connection".into());
                     }
-                    Some(Err(e)) => {
-                        error!("WebSocket error: {}", e);
-                        break;
-                    }
-                    None => {
-                        warn!("WebSocket stream ended");
-                        break;
-                    }
+                    Some(Err(e)) => return lost(e.to_string()),
+                    None => return lost("stream ended".into()),
                     _ => {}
                 }
             }
@@ -275,14 +302,17 @@ async fn connect_and_run(
                 match cmd {
                     Some(msg) => {
                         trace!("Sending message: {:?}", msg);
+                        let closing = matches!(msg, Message::Close(_));
                         if let Err(e) = write.send(msg).await {
-                            error!("Failed to send message: {}", e);
-                            break;
+                            return lost(format!("failed to send message: {e}"));
+                        }
+                        if closing {
+                            return Ok(());
                         }
                     }
                     None => {
                         info!("Command channel closed");
-                        break;
+                        return Ok(());
                     }
                 }
             }
@@ -291,22 +321,17 @@ async fn connect_and_run(
             _ = heartbeat.tick() => {
                 trace!("Sending heartbeat ping");
                 if let Err(e) = write.send(Message::Ping(vec![])).await {
-                    error!("Failed to send heartbeat: {}", e);
-                    break;
+                    return lost(format!("failed to send heartbeat: {e}"));
                 }
 
                 // Check if we've received a pong recently
                 let elapsed = last_pong.elapsed();
                 if elapsed > config.heartbeat_interval * 3 {
-                    warn!("No pong received for {:?}, connection may be dead", elapsed);
-                    break;
+                    return lost(format!("no pong for {elapsed:?}"));
                 }
             }
         }
     }
-
-    info!("WebSocket connection closed");
-    Ok(())
 }
 
 #[cfg(test)]
@@ -389,17 +414,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_ws_config_invalid_url() {
-        // Non-wss:// URL should fail in connect_and_run
+        // Non-wss:// URL should fail in connect
         let config = WsConfig {
             url: "ws://example.com".to_string(), // Not wss://
             heartbeat_interval: Duration::from_secs(30),
             reconnect_config: ReconnectConfig::default(),
         };
 
-        let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
-        let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-
-        let result = connect_and_run(&config, &mut cmd_rx, &msg_tx).await;
+        let result = connect(&config).await;
         assert!(result.is_err(), "Should reject non-wss:// URLs");
         if let Err(ExchangeError::Other(msg)) = result {
             assert!(msg.contains("wss://") || msg.contains("TLS"));
@@ -414,10 +436,7 @@ mod tests {
             reconnect_config: ReconnectConfig::default(),
         };
 
-        let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
-        let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-
-        let result = connect_and_run(&config, &mut cmd_rx, &msg_tx).await;
+        let result = connect(&config).await;
         assert!(result.is_err(), "Should reject empty URL");
     }
 
@@ -463,5 +482,104 @@ mod tests {
         let result = WebSocketClient::connect(config).await;
         // Will fail to connect, but should not panic
         assert!(result.is_ok() || result.is_err());
+    }
+
+    type Frames = Vec<Result<Message, std::io::Error>>;
+
+    fn cfg(heartbeat: Duration) -> WsConfig {
+        WsConfig {
+            url: "wss://example.com".to_string(),
+            heartbeat_interval: heartbeat,
+            reconnect_config: ReconnectConfig::default(),
+        }
+    }
+
+    /// Run a session over `frames` followed by silence-or-end.
+    async fn session(
+        frames: Frames,
+        end_with_silence: bool,
+        heartbeat: Duration,
+        cmds: Vec<Message>,
+    ) -> (Result<(), ExchangeError>, Vec<WsMessage>) {
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        for c in cmds {
+            cmd_tx.send(c).unwrap();
+        }
+        let write = futures_util::sink::drain::<Message>();
+        let iter = futures_util::stream::iter(frames);
+        let result = if end_with_silence {
+            let read = iter.chain(futures_util::stream::pending());
+            run_session(&cfg(heartbeat), write, read, &mut cmd_rx, &msg_tx).await
+        } else {
+            run_session(&cfg(heartbeat), write, iter, &mut cmd_rx, &msg_tx).await
+        };
+        drop(msg_tx);
+        let mut seen = vec![];
+        while let Some(m) = msg_rx.recv().await {
+            seen.push(m);
+        }
+        drop(cmd_tx);
+        (result, seen)
+    }
+
+    #[tokio::test]
+    async fn session_stream_end_is_an_error_so_the_caller_reconnects() {
+        let frames = vec![Ok(Message::Text("hi".into()))];
+        let (r, seen) = session(frames, false, Duration::from_secs(30), vec![]).await;
+        assert!(r.is_err());
+        assert!(matches!(seen.as_slice(), [WsMessage::Text(t)] if t == "hi"));
+    }
+
+    #[tokio::test]
+    async fn session_server_close_is_an_error_and_is_forwarded() {
+        let frames = vec![Ok(Message::Close(None))];
+        let (r, seen) = session(frames, true, Duration::from_secs(30), vec![]).await;
+        assert!(r.is_err());
+        assert!(matches!(seen.as_slice(), [WsMessage::Close]));
+    }
+
+    #[tokio::test]
+    async fn session_read_error_is_an_error() {
+        let frames = vec![Err(std::io::Error::other("boom"))];
+        let (r, _) = session(frames, true, Duration::from_secs(30), vec![]).await;
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn session_goes_stale_without_pongs_and_errors() {
+        // No traffic at all: only the heartbeat timer can notice.
+        let (r, _) = session(vec![], true, Duration::from_millis(10), vec![]).await;
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn session_client_close_is_a_clean_end() {
+        let (r, _) = session(
+            vec![],
+            true,
+            Duration::from_secs(30),
+            vec![Message::Close(None)],
+        )
+        .await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn session_receiver_dropped_is_a_clean_end() {
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        drop(msg_rx);
+        let read =
+            futures_util::stream::iter(vec![Ok::<_, std::io::Error>(Message::Text("x".into()))]);
+        let r = run_session(
+            &cfg(Duration::from_secs(30)),
+            futures_util::sink::drain::<Message>(),
+            read,
+            &mut cmd_rx,
+            &msg_tx,
+        )
+        .await;
+        assert!(r.is_ok());
     }
 }
