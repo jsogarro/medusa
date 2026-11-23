@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('electron', () => ({ app: { isPackaged: true } }))
@@ -28,5 +30,14 @@ describe('isTrustedUrl', () => {
     expect(isTrustedSender({ senderFrame: { url: 'file:///a/renderer/index.html' } })).toBe(true)
     expect(isTrustedSender({ senderFrame: { url: 'https://evil.example/' } })).toBe(false)
     expect(isTrustedSender({ senderFrame: null })).toBe(false)
+  })
+})
+
+describe('renderer CSP', () => {
+  const csp = readFileSync(join(__dirname, '../renderer/index.html'), 'utf8')
+  const directive = (name: string) => new RegExp(`${name}\\s+([^;]+);`).exec(csp)?.[1].trim().split(/\s+/) ?? []
+
+  it('connect-src allows only the dev server, never an arbitrary localhost port', () => {
+    expect(directive('connect-src')).toEqual(['self'].map((s) => `'${s}'`).concat(['ws://localhost:5173', 'http://localhost:5173']))
   })
 })
