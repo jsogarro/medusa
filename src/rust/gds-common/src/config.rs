@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 /// Top-level GDS subscriber configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct GdsConfig {
     /// Tickerplant host
     pub tp_host: String,
@@ -20,6 +20,20 @@ pub struct GdsConfig {
     pub exchanges: Vec<ExchangeConfig>,
     /// Health check timeout in seconds
     pub health_timeout_secs: u64,
+}
+
+// Hand-written so `{:?}` can never print the Tickerplant password.
+impl std::fmt::Debug for GdsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GdsConfig")
+            .field("tp_host", &self.tp_host)
+            .field("tp_port", &self.tp_port)
+            .field("tp_user", &self.tp_user)
+            .field("tp_password", &"<redacted>")
+            .field("exchanges", &self.exchanges)
+            .field("health_timeout_secs", &self.health_timeout_secs)
+            .finish()
+    }
 }
 
 impl GdsConfig {
@@ -113,5 +127,21 @@ impl ExchangeConfig {
             enabled: std::env::var("ALPACA_API_KEY").is_ok()
                 && std::env::var("ALPACA_SECRET_KEY").is_ok(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_does_not_leak_the_tickerplant_password() {
+        let config = GdsConfig {
+            tp_password: "hunter2-secret".to_string(),
+            ..GdsConfig::default()
+        };
+        let shown = format!("{:?}", config);
+        assert!(!shown.contains("hunter2-secret"), "{}", shown);
+        assert!(shown.contains("tp_host"));
     }
 }
