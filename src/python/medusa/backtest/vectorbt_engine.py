@@ -88,6 +88,15 @@ class VectorBTEngine:
         filtered[~mask] = False
         return filtered
 
+    @staticmethod
+    def _as_signal(signal: Any, price: pd.Series | pd.DataFrame) -> pd.Series | pd.DataFrame:
+        """Return ``signal`` as a pandas object on the price index (arrays and lists included)."""
+        if isinstance(signal, (pd.Series, pd.DataFrame)):
+            return signal
+        if isinstance(price, pd.DataFrame):
+            return pd.DataFrame(signal, index=price.index, columns=price.columns)
+        return pd.Series(np.asarray(signal), index=price.index)
+
     def run_signals(
         self,
         price: pd.Series | pd.DataFrame,
@@ -116,7 +125,9 @@ class VectorBTEngine:
         for name in ("short_entries", "short_exits"):
             if name in kwargs:
                 signals[name] = kwargs.pop(name)
-        signals = {k: v.shift(1, fill_value=False) for k, v in signals.items()}
+        signals = {
+            k: self._as_signal(v, price).shift(1, fill_value=False) for k, v in signals.items()
+        }
 
         # Filter signals by market hours (equity only)
         if self.asset_class == "equity":

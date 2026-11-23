@@ -104,3 +104,41 @@ def test_full_report_threads_periods():
     assert d365["sharpe_ratio"] == pytest.approx(d252["sharpe_ratio"] * np.sqrt(365 / 252))
     assert d365["sortino_ratio"] == pytest.approx(RiskAnalytics.sortino_ratio(r, periods=365))
     assert d365["calmar_ratio"] == pytest.approx(RiskAnalytics.calmar_ratio(r, periods=365))
+
+
+@pytest.mark.parametrize("as_frame", [False, True])
+def test_run_signals_accepts_array_like_signals(monkeypatch, as_frame):
+    captured = {}
+
+    class _Portfolio:
+        @staticmethod
+        def from_signals(**kw):
+            captured.update(kw)
+            return types.SimpleNamespace(total_return=lambda: 0.0)
+
+    monkeypatch.setitem(sys.modules, "vectorbt", types.SimpleNamespace(Portfolio=_Portfolio))
+    idx = pd.date_range("2024-01-01", periods=5, freq="D")
+    price = pd.Series(np.arange(5.0) + 100, index=idx)
+    entries = np.array([False, True, False, False, False])
+    exits = [False, False, False, True, False]
+    short_in = np.array([True, False, False, False, False])
+    if as_frame:
+        price = price.to_frame("x")
+        entries, exits, short_in = (np.reshape(a, (5, 1)) for a in (entries, exits, short_in))
+
+    VectorBTEngine(asset_class="crypto").run_signals(
+        price, entries, exits, short_entries=short_in, short_exits=exits
+    )
+
+    assert captured["entries"].index.equals(idx)
+    assert captured["entries"].to_numpy().ravel().tolist() == [False, False, True, False, False]
+    assert captured["exits"].to_numpy().ravel().tolist() == [False, False, False, False, True]
+    assert captured["short_entries"].to_numpy().ravel().tolist() == [
+        False,
+        True,
+        False,
+        False,
+        False,
+    ]
+
+
