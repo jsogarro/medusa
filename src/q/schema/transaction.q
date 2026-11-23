@@ -1,27 +1,27 @@
 / ============================================================================
 / transaction.q - Inter-Exchange Transaction Management
 / ============================================================================
-/
+/ /
 / Provides:
 /   - Transaction lifecycle (pending → confirming → completed)
 /   - Balance reservation and release
 /   - Fee handling in same or different currency
 /   - Transaction status transitions with balance updates
-/
+/ /
 / Dependencies:
 /   - types.q (validation, constants, ID generator)
 /   - exchange.q (balance operations: reserve, release, deduct, credit)
-/
+/ /
 / Tables:
 /   - transaction: Fund transfers between exchanges (keyed by transaction_id)
-/
+/ /
 / Functions:
 /   - Commands: createTransaction, updateTransactionStatus, updateTransactionAddresses
 /   - Queries: getTransaction, getPendingTransactions, getTransactionsByExchange,
 /              getTransactionsByStatus, getRecentTransactions
 /   - Analytics: getTotalTransferVolume, getTotalTransferFees, getAvgConfirmationTime,
 /                getTransactionFlow
-/
+/ /
 / State Machine:
 /   pending -> confirming -> completed
 /   pending -> failed
@@ -69,7 +69,7 @@ initTransactionTable:{[]
   transaction::transactionSchema;
 
   / Create primary key
-  `transaction_id xkey `transaction;
+  transaction::`transaction_id xkey transaction;
  };
 
 // ============================================================================

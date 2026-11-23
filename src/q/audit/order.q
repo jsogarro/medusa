@@ -1,17 +1,14 @@
 / ============================================================================
 / order.q - Order Audit Implementation
 / ============================================================================
-/
-/ Verifies all orders in the local database match exchange records.
+/ // Verifies all orders in the local database match exchange records.
 / Detects: missing fills, incorrect statuses, orphaned orders,
 /          fill amount discrepancies.
-/
-/ Dependencies:
+/ // Dependencies:
 /   - audit.q (core infrastructure)
 /   - schema/order.q (.qg.order table)
 /   - exchange/base.q (.exchange.getOpenOrders, etc.)
-/
-/ Usage:
+/ // Usage:
 /   .audit.ORDER.validate[]   / Run full order audit
 /   .audit.run[`ORDER_AUDIT]  / Run via audit framework
 / ============================================================================

@@ -1,19 +1,16 @@
 / ============================================================================
 / coordinator.q - Exchange Coordinator for Multi-Exchange Orchestration
 / ============================================================================
-/
-/ Provides:
+/ // Provides:
 /   - Multi-exchange connection management
 /   - Order routing across exchanges
 /   - Balance management and fund allocation
 /   - Cross-exchange position aggregation
 /   - Exchange health monitoring
-/
-/ Dependencies:
+/ // Dependencies:
 /   - base.q (exchange interface)
 /   - registry.q (exchange implementation registry)
-/
-/ Functions:
+/ // Functions:
 /   - init: Initialize coordinator
 /   - connect: Connect to exchange
 /   - disconnect: Disconnect from exchange
@@ -197,6 +194,14 @@ placeOrder:{[exchangeName;pair;orderType;side;price;quantity]
   if[not side in `buy`sell; '"Invalid side: must be `buy or `sell"];
   if[null pair; '"Invalid pair: pair cannot be null"];
 
+  / Defense-in-depth: Enforce rate limiting at coordinator level
+  / (Risk module already checks this, but coordinator enforces as final gate)
+  if[not ()~key `.risk.checkRateLimit;
+    rateLimitResult:.risk.checkRateLimit[exchangeName;pair];
+    if[not rateLimitResult 0;
+      '"Rate limit violation: ",string rateLimitResult 1];
+  ];
+
   / Generate orderId using atomic counter
   orderIdCounter+:1;
   orderId:`$"ORD_",string[orderIdCounter],"_",string[exchangeName];
@@ -208,15 +213,20 @@ placeOrder:{[exchangeName;pair;orderType;side;price;quantity]
   / Record routing as pending BEFORE placement
   orderRouting[orderId]:(exchangeName;.z.p;`pending);
 
+  / Log order placement attempt
+  .log.event[`INFO;`exchange;`placeOrder;`orderId`exchange`pair`side`price`quantity`mode!(orderId;exchangeName;pair;side;price;quantity;coordinatorMode)];
+
   / Check mode - in dryrun mode, simulate order placement
   result:$[coordinatorMode=`dryrun;
     [
       / Dry-run mode: simulate order placement
       -1 "  [DRY-RUN] Simulating order placement: ",string orderId;
+      .log.event[`INFO;`exchange;`orderSimulated;`orderId`exchange`pair!(orderId;exchangeName;pair)];
       `orderId`status`exchange`pair`side`price`quantity!(orderId;`simulated;exchangeName;pair;side;price;quantity)
     ];
     [
       / Live mode: delegate to exchange implementation
+      .log.event[`INFO;`exchange;`orderPlacedLive;`orderId`exchange!(orderId;exchangeName)];
       .exchange.placeOrder[exchangeName;pair;orderType;side;price;quantity]
     ]
   ];

@@ -105,13 +105,7 @@ impl WebSocketClient {
         // Spawn connection task
         tokio::spawn(connection_task(config.clone(), cmd_rx, msg_tx));
 
-        Ok((
-            Self {
-                config,
-                tx: cmd_tx,
-            },
-            msg_rx,
-        ))
+        Ok((Self { config, tx: cmd_tx }, msg_rx))
     }
 
     /// Send a text message
@@ -403,9 +397,9 @@ mod tests {
         };
 
         let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
-        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
-        let result = connect_and_run(&config, &mut cmd_rx.into(), &msg_tx).await;
+        let result = connect_and_run(&config, &mut cmd_rx, &msg_tx).await;
         assert!(result.is_err(), "Should reject non-wss:// URLs");
         if let Err(ExchangeError::Other(msg)) = result {
             assert!(msg.contains("wss://") || msg.contains("TLS"));
@@ -421,9 +415,9 @@ mod tests {
         };
 
         let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
-        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
-        let result = connect_and_run(&config, &mut cmd_rx.into(), &msg_tx).await;
+        let result = connect_and_run(&config, &mut cmd_rx, &msg_tx).await;
         assert!(result.is_err(), "Should reject empty URL");
     }
 

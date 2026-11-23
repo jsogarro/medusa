@@ -1,16 +1,13 @@
 / ============================================================================
 / runner.q - Audit Runner and Scheduler
 / ============================================================================
-/
-/ Executes audits at configurable intervals (every N ticks or time-based)
+/ // Executes audits at configurable intervals (every N ticks or time-based)
 / without blocking the main strategy loop. Triggers alerts on failures.
-/
-/ Dependencies:
+/ // Dependencies:
 /   - audit.q (core infrastructure)
 /   - All audit implementations (order, volume_balance, fiat_balance, ledger, position_cache)
 /   - config/config.q (.conf.get) — optional, uses defaults if unavailable
-/
-/ Usage:
+/ // Usage:
 /   .audit.schedule[100]              / Run audits every 100 ticks
 /   .audit.scheduleTime[0D01:00:00]  / Run audits every hour
 /   .audit.stop[]                    / Stop scheduler

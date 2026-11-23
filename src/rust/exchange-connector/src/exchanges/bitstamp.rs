@@ -23,9 +23,9 @@ const BASE_URL: &str = "https://www.bitstamp.net/api/v2";
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // Security: Validation constants for price/quantity bounds
-const MAX_PRICE: f64 = 1_000_000_000.0;  // $1B per unit
+const MAX_PRICE: f64 = 1_000_000_000.0; // $1B per unit
 const MAX_QUANTITY: f64 = 1_000_000_000.0; // 1B units
-const MIN_POSITIVE: f64 = 1e-18;  // 18 decimal places
+const MIN_POSITIVE: f64 = 1e-18; // 18 decimal places
 
 /// Bitstamp REST client
 ///
@@ -132,13 +132,20 @@ impl BitstampClient {
         if let Ok(err_resp) = serde_json::from_str::<ErrorResponse>(body) {
             let message = err_resp
                 .error
-                .or_else(|| err_resp.reason.as_ref().and_then(|r| r.as_str().map(String::from)))
+                .or_else(|| {
+                    err_resp
+                        .reason
+                        .as_ref()
+                        .and_then(|r| r.as_str().map(String::from))
+                })
                 .unwrap_or_else(|| body.to_string());
 
             return match status {
                 429 => ExchangeError::RateLimit(message),
                 401 | 403 => ExchangeError::Authentication(message),
-                400 if message.contains("insufficient") => ExchangeError::InsufficientBalance(message),
+                400 if message.contains("insufficient") => {
+                    ExchangeError::InsufficientBalance(message)
+                }
                 404 => ExchangeError::OrderNotFound(message),
                 _ => ExchangeError::Other(format!("Bitstamp error {}: {}", status, message)),
             };
@@ -214,20 +221,26 @@ impl ExchangeClient for BitstampClient {
                 return Err(ExchangeError::Other("Invalid price level format".into()));
             }
 
-            let price: f64 = level[0].parse().map_err(|_| {
-                ExchangeError::Other(format!("Invalid price: {}", level[0]))
-            })?;
+            let price: f64 = level[0]
+                .parse()
+                .map_err(|_| ExchangeError::Other(format!("Invalid price: {}", level[0])))?;
 
-            let quantity: f64 = level[1].parse().map_err(|_| {
-                ExchangeError::Other(format!("Invalid quantity: {}", level[1]))
-            })?;
+            let quantity: f64 = level[1]
+                .parse()
+                .map_err(|_| ExchangeError::Other(format!("Invalid quantity: {}", level[1])))?;
 
             // Security: Validate numeric bounds to prevent overflow/manipulation
             if !price.is_finite() || !(MIN_POSITIVE..=MAX_PRICE).contains(&price) {
-                return Err(ExchangeError::Other(format!("Price out of range: {}", price)));
+                return Err(ExchangeError::Other(format!(
+                    "Price out of range: {}",
+                    price
+                )));
             }
             if !quantity.is_finite() || !(0.0..=MAX_QUANTITY).contains(&quantity) {
-                return Err(ExchangeError::Other(format!("Quantity out of range: {}", quantity)));
+                return Err(ExchangeError::Other(format!(
+                    "Quantity out of range: {}",
+                    quantity
+                )));
             }
 
             Ok(PriceLevel { price, quantity })
@@ -485,7 +498,11 @@ impl ExchangeClient for BitstampClient {
 
     async fn cancel_all_orders(&self, pair: Option<&str>) -> Result<u32, ExchangeError> {
         let url = if let Some(p) = pair {
-            format!("{}/cancel_all_orders/{}/", BASE_URL, Self::normalize_pair(p))
+            format!(
+                "{}/cancel_all_orders/{}/",
+                BASE_URL,
+                Self::normalize_pair(p)
+            )
         } else {
             format!("{}/cancel_all_orders/", BASE_URL)
         };
@@ -494,7 +511,9 @@ impl ExchangeClient for BitstampClient {
         let signature = self.generate_signature(nonce, "");
 
         debug!("Cancelling all Bitstamp orders for {:?}", pair);
-        self.rate_limiter.acquire(Some("/cancel_all_orders"), 1).await;
+        self.rate_limiter
+            .acquire(Some("/cancel_all_orders"), 1)
+            .await;
 
         let response = self
             .client
@@ -540,22 +559,13 @@ mod tests {
 
     #[test]
     fn test_parse_error() {
-        let err = BitstampClient::parse_error(
-            429,
-            r#"{"error": "Rate limit exceeded"}"#,
-        );
+        let err = BitstampClient::parse_error(429, r#"{"error": "Rate limit exceeded"}"#);
         assert!(matches!(err, ExchangeError::RateLimit(_)));
 
-        let err = BitstampClient::parse_error(
-            401,
-            r#"{"error": "Invalid API key"}"#,
-        );
+        let err = BitstampClient::parse_error(401, r#"{"error": "Invalid API key"}"#);
         assert!(matches!(err, ExchangeError::Authentication(_)));
 
-        let err = BitstampClient::parse_error(
-            400,
-            r#"{"error": "insufficient funds"}"#,
-        );
+        let err = BitstampClient::parse_error(400, r#"{"error": "insufficient funds"}"#);
         assert!(matches!(err, ExchangeError::InsufficientBalance(_)));
     }
 

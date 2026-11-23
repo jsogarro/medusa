@@ -1,0 +1,57 @@
+{
+  "positionLimits": {
+    "maxPositionSize": 1000000,
+    "maxPositionPct": 10.0
+  },
+  "drawdown": {
+    "warnPct": 5.0,
+    "haltPct": 10.0,
+    "maxPct": 15.0
+  },
+  "rateLimit": {
+    "binance": {
+      "ordersPerSec": 8,
+      "burstCapacity": 20
+    },
+    "coinbase": {
+      "ordersPerSec": 12,
+      "burstCapacity": 30
+    },
+    "kraken": {
+      "ordersPerSec": 8,
+      "burstCapacity": 15
+    },
+    "bitstamp": {
+      "ordersPerSec": 6,
+      "burstCapacity": 12
+    },
+    "alpaca": {
+      "ordersPerSec": 200,
+      "burstCapacity": 500
+    }
+  },
+  "concentration": {
+    "maxExchangePct": 40.0,
+    "maxAssetPct": 25.0
+  },
+  "pdt": {
+    "accountMinimum": 25000,
+    "maxDayTrades": 4,
+    "windowDays": 5
+  },
+  "margin": {
+    "regTInitialMargin": 0.50,
+    "regTMaintenanceMargin": 0.25,
+    "portfolioMarginFactor": 0.15
+  },
+  "greeks": {
+    "maxDelta": 1000,
+    "maxGamma": 500,
+    "maxVega": 10000,
+    "maxTheta": -5000
+  },
+  "marketImpact": {
+    "warnPct": 1.0,
+    "rejectPct": 5.0
+  }
+}

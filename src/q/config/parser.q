@@ -1,38 +1,38 @@
 / Configuration File Parser
 / Parses .conf files into nested dictionaries
 
-\d .conf.parser
+\d .conf
 
 / Helper: trim whitespace from string (vectorized)
-ltrim:{$[10h=type x; $[count x; $[" "=first x; ltrim 1_x; x]; x]; x]};
-rtrim:{$[10h=type x; $[count x; $[" "=last x; rtrim -1_x; x]; x]; x]};
-trim:{rtrim ltrim x};
+parser.ltrim:{$[10h=type x; $[count x; $[" "=first x; parser.ltrim 1_x; x]; x]; x]};
+parser.rtrim:{$[10h=type x; $[count x; $[" "=last x; parser.rtrim -1_x; x]; x]; x]};
+parser.trim:{parser.rtrim parser.ltrim x};
 
 / Parse a single line from .conf file
-parseLine:{[line]
+parser.parseLine:{[line]
   / Trim whitespace
-  line:trim line;
+  line:parser.trim line;
 
   / Skip empty lines and comments
   if[(0=count line) or "#"=first line; :()];
 
   / Section header: [section_name]
   if["["=first line;
-    :(`section; `$trim 1_-1_line)
+    :(`section; `$parser.trim 1_-1_line)
   ];
 
   / Key-value pair: key=value
   parts:"="vs line;
   if[2<>count parts; :(`;`;`error)];  / Invalid line
 
-  key:`$trim first parts;
-  val:trim last parts;
+  confKey:`$parser.trim first parts;
+  confVal:parser.trim last parts;
 
-  :(`kv; key; val)
+  :(`kv; confKey; confVal)
  };
 
 / Parse .conf file into nested dictionary
-parseFile:{[filepath]
+parser.parseFile:{[filepath]
   / Read file line by line
   lines:read0 hsym `$filepath;
 
@@ -44,7 +44,7 @@ parseFile:{[filepath]
   result:{[state;line]
     config:state 0;
     currentSection:state 1;
-    parsed:parseLine[line];
+    parsed:parser.parseLine[line];
 
     / Handle different parse results
     $[
@@ -54,8 +54,8 @@ parseFile:{[filepath]
       `kv~first parsed;
         / Key-value pair
         [
-          key:parsed 1;
-          val:parsed 2;
+          confKey:parsed 1;
+          confVal:parsed 2;
 
           / Initialize section if needed
           if[not currentSection in key config;
@@ -63,7 +63,10 @@ parseFile:{[filepath]
           ];
 
           / Add to section
-          config[currentSection][key]:val
+          sectionConfig:config currentSection;
+          sectionConfig[confKey]:confVal;
+          config[currentSection]:sectionConfig;
+          config
         ];
       / else: skip invalid lines
       config
@@ -77,4 +80,4 @@ parseFile:{[filepath]
   first result
  };
 
-\d .
+\d .conf

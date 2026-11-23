@@ -9,6 +9,23 @@ import pandas as pd
 from loguru import logger
 from sklearn.model_selection import TimeSeriesSplit
 
+try:
+    import xgboost as xgb
+
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    xgb = None  # type: ignore
+    XGBOOST_AVAILABLE = False
+
+
+def check_xgboost_available() -> None:
+    """Raise clear error if XGBoost not available."""
+    if not XGBOOST_AVAILABLE:
+        raise ImportError(
+            "XGBoost is not installed. Install with: pip install xgboost\n"
+            "Note: XGBoost may have compatibility issues on macOS ARM64 with numpy 2.x"
+        )
+
 
 class XGBoostSignalModel:
     """XGBoost for feature-based signal generation.
@@ -25,9 +42,9 @@ class XGBoostSignalModel:
         n_estimators: int = 100,
         **kwargs: Any,
     ) -> None:
-        import xgboost as xgb
+        check_xgboost_available()
 
-        self.model = xgb.XGBRegressor(
+        self.model = xgb.XGBRegressor(  # type: ignore
             objective=objective,
             max_depth=max_depth,
             learning_rate=learning_rate,

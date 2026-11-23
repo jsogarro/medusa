@@ -4,9 +4,11 @@
 \d .conf
 
 / Load submodules
-\l parser.q
-\l validator.q
-\l loader.q
+\l src/q/config/parser.q
+\l src/q/config/validator.q
+\l src/q/config/loader.q
+
+\d .conf
 
 / Global configuration store
 current:()!();
@@ -42,20 +44,24 @@ initWithReload:{[configPath;defaults;schema]
 / section: `strategy, `exchange, etc.
 / key: `tick_sleep, `name, etc.
 / default: value to return if not found
-get:{[section;key;default]
+set[`.conf.get;{[section;confKey;default]
   if[not section in key current; :default];
-  if[not key in key current[section]; :default];
+  sectionConfig:current section;
+  sectionKeys:key sectionConfig;
+  if[not confKey in sectionKeys; :default];
 
-  current[section][key]
- };
+  sectionValues:value sectionConfig;
+  valueIndex:sectionKeys?confKey;
+  $[0>type sectionValues; sectionValues; sectionValues valueIndex]
+ }];
 
 / Get configuration value with type coercion
 / section: `strategy, `exchange, etc.
 / key: `tick_sleep, `name, etc.
 / typeName: `int, `float, `symbol, `bool, `string, `list
 / default: value to return if not found (already typed)
-getTyped:{[section;key;typeName;default]
-  val:get[section; key; default];
+getTyped:{[section;confKey;typeName;default]
+  val:.conf.get[section; confKey; default];
   if[val~default; :val];  / Not found, return default
 
   / Coerce if it's still a string
@@ -67,15 +73,17 @@ getTyped:{[section;key;typeName;default]
  };
 
 / Set configuration value (runtime override)
-set:{[section;key;value]
+set[`.conf.set;{[section;confKey;confValue]
   if[not section in key current;
     current[section]::()!()
   ];
 
-  current[section][key]::value;
+  sectionConfig:current section;
+  sectionConfig[confKey]:confValue;
+  current[section]::sectionConfig;
 
-  value
- };
+  confValue
+ }];
 
 / Reload configuration from disk (re-reads file and env vars)
 / Useful for hot-reloading in development

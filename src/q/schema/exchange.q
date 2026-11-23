@@ -1,23 +1,23 @@
 / ============================================================================
 / exchange.q - Exchange Account Management
 / ============================================================================
-/
+/ /
 / Provides:
 /   - Exchange account CRUD (exchange table)
 /   - Balance tracking per currency (balance table)
 /   - Leveraged positions (position table)
 /   - Target balance management (target table)
 /   - Balance operation helpers (reserve, release, deduct, credit)
-/
+/ /
 / Dependencies:
 /   - types.q (validation, constants, ID generator)
-/
+/ /
 / Tables:
 /   - exchange: Exchange accounts with metadata
 /   - balance: Currency balances (keyed by exchange_name, currency)
 /   - position: Leveraged trading positions
 /   - target: Desired balance targets with priorities
-/
+/ /
 / Functions:
 /   - Exchange: createExchange, updateExchange, deactivateExchange, getExchange
 /   - Balance: updateBalance, getBalance, getExchangeBalances

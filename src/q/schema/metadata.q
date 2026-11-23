@@ -1,19 +1,19 @@
 / ============================================================================
 / metadata.q - Datum and Flag Management
 / ============================================================================
-/
+/ /
 / Provides:
 /   - Generic key-value storage for metrics (datum table)
 /   - Feature flag management (flag table)
 /   - Metric helpers (setMetric, incrMetric, getMetricsDict)
-/
+/ /
 / Dependencies:
 /   - types.q (validation, constants, ID generator)
-/
+/ /
 / Tables:
 /   - datum: Generic key-value storage (keyed by datum_id, unique on category+key)
 /   - flag: Feature flags (keyed by flag_id, unique on name)
-/
+/ /
 / Functions:
 /   - Datum: setDatum, getDatum, getDatumsByCategory, deleteDatum, getRecentDatums
 /   - Datum Queries: searchDatums, getDatumsByType, getDatumCategories
@@ -30,16 +30,16 @@
 // ============================================================================
 
 // Generic key-value table for storing arbitrary metrics and data
-datumSchema:([]
-  datum_id: `long$();                    / Unique datum ID (auto-increment, PK)
-  key: `symbol$();                       / Metric/data key
-  value: ();                             / Value (any kdb+ type)
-  value_type: `symbol$();                / Type indicator (long/float/symbol/etc.)
-  category: `symbol$();                  / Category/namespace for organization
-  description: `symbol$();               / Human-readable description
-  time_created: `timestamp$();           / Creation timestamp
-  time_updated: `timestamp$();           / Last update timestamp
-  meta_data: ()                          / Additional metadata dictionary
+datumSchema:flip `datum_id`key`value`value_type`category`description`time_created`time_updated`meta_data!(
+  `long$();                              / Unique datum ID (auto-increment, PK)
+  `symbol$();                            / Metric/data key
+  ();                                    / Value (any kdb+ type)
+  `symbol$();                            / Type indicator (long/float/symbol/etc.)
+  `symbol$();                            / Category/namespace for organization
+  `symbol$();                            / Human-readable description
+  `timestamp$();                         / Creation timestamp
+  `timestamp$();                         / Last update timestamp
+  ()                                     / Additional metadata dictionary
  );
 
 // Primary key: datum_id
@@ -75,8 +75,8 @@ initMetadataTables:{[]
   flag::flagSchema;
 
   / Create primary keys
-  `datum_id xkey `datum;
-  `flag_id xkey `flag;
+  datum::`datum_id xkey datum;
+  flag::`flag_id xkey flag;
  };
 
 // ============================================================================
@@ -85,13 +85,13 @@ initMetadataTables:{[]
 
 // Set datum value (upsert)
 // Usage: .qg.setDatum[`performance; `avg_latency; 123.45; `float; "Average latency in ms"; ...]
-setDatum:{[category; key; value; valueType; description; metaData]
+setDatum:{[datumCategory; datumKey; datumValue; valueType; datumDescription; metaData]
   / Validate inputs
-  if[null key; '"Key cannot be null"];
-  if[null category; '"Category cannot be null"];
+  if[null datumKey; '"Key cannot be null"];
+  if[null datumCategory; '"Category cannot be null"];
 
   / Check if datum exists
-  existing:select from datum where category=category, key=key;
+  existing:select from datum where category=datumCategory, key=datumKey;
 
   / Upsert
   if[0 = count existing;
@@ -100,11 +100,11 @@ setDatum:{[category; key; value; valueType; description; metaData]
 
     `datum insert (
       datumId;                           / datum_id
-      key;                               / key
-      value;                             / value
+      datumKey;                          / key
+      datumValue;                        / value
       valueType;                         / value_type
-      category;                          / category
-      description;                       / description
+      datumCategory;                     / category
+      datumDescription;                  / description
       .z.p;                              / time_created
       .z.p;                              / time_updated
       metaData                           / meta_data
@@ -112,31 +112,42 @@ setDatum:{[category; key; value; valueType; description; metaData]
   ];
 
   if[0 < count existing;
-    / Update existing datum
-    update value:value, value_type:valueType, description:description,
-      meta_data:metaData, time_updated:.z.p
-      from `datum where category=category, key=key;
+    / Replace existing datum; q's update syntax cannot assign reserved column `value`.
+    datumId:first existing`datum_id;
+    createdAt:first existing`time_created;
+    delete from `datum where category=datumCategory, key=datumKey;
+    `datum insert (
+      datumId;
+      datumKey;
+      datumValue;
+      valueType;
+      datumCategory;
+      datumDescription;
+      createdAt;
+      .z.p;
+      metaData
+    );
   ];
 
-  (category; key)
+  (datumCategory; datumKey)
  };
 
 // Get datum value
-getDatum:{[category; key]
-  res:first select from datum where category=category, key=key;
+getDatum:{[datumCategory; datumKey]
+  res:first select from datum where category=datumCategory, key=datumKey;
   if[0 = count res; :()];
   res[`value]
  };
 
 // Get all datums in category
-getDatumsByCategory:{[category]
-  select from datum where category=category
+getDatumsByCategory:{[datumCategory]
+  select from datum where category=datumCategory
  };
 
 // Delete datum
-deleteDatum:{[category; key]
-  delete from `datum where category=category, key=key;
-  (category; key)
+deleteDatum:{[datumCategory; datumKey]
+  delete from `datum where category=datumCategory, key=datumKey;
+  (datumCategory; datumKey)
  };
 
 // Get recent datums
@@ -297,26 +308,26 @@ getFlagStats:{[]
 // ============================================================================
 
 // Set numeric metric
-setMetric:{[category; key; value; description]
+setMetric:{[metricCategory; metricKey; metricValue; metricDescription]
   valueType:$[
-    value~"j"$value; `long;
-    value~"f"$value; `float;
+    metricValue~"j"$metricValue; `long;
+    metricValue~"f"$metricValue; `float;
     `unknown
   ];
-  .qg.setDatum[category; key; value; valueType; description; ()!()]
+  .qg.setDatum[metricCategory; metricKey; metricValue; valueType; metricDescription; ()!()]
  };
 
 // Increment metric
-incrMetric:{[category; key; delta]
-  currentValue:.qg.getDatum[category; key];
+incrMetric:{[metricCategory; metricKey; delta]
+  currentValue:.qg.getDatum[metricCategory; metricKey];
   if[0 = count currentValue; currentValue:0j];
   newValue:currentValue + delta;
-  .qg.setMetric[category; key; newValue; ""]
+  .qg.setMetric[metricCategory; metricKey; newValue; ""]
  };
 
 // Get all metrics in category as dictionary
-getMetricsDict:{[category]
-  datums:.qg.getDatumsByCategory[category];
+getMetricsDict:{[metricCategory]
+  datums:.qg.getDatumsByCategory[metricCategory];
   (exec key from datums)!(exec value from datums)
  };
 

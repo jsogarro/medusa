@@ -14,7 +14,7 @@ strategy.new:{[id;name;actor;fns]
 
   / Merge custom functions with defaults (defaults first, then custom overrides)
   customFns:types.defaultFns,fns;  / custom fns override defaults
-  state[`metadata;`fns]:customFns;
+  state[`metadata]:state[`metadata],`fns`tickCount!(customFns;0);
 
   state
  }
@@ -59,7 +59,7 @@ strategy.setUp:{[state]
 
   / Transition to ready status
   state[`status]:`ready;
-  state[`metadata;`setUpAt]:.z.p;
+  state[`metadata]:state[`metadata],enlist[`setUpAt]!enlist .z.p;
 
   state
  }
@@ -72,8 +72,13 @@ strategy.start:{[state]
   if[not state[`status] in `ready`paused;
     '"Cannot start strategy in status: ",string state[`status]];
 
+  / Log strategy start
+  if[`log in key `.;
+    .log.event[`INFO;`algo;`strategyStarted;`strategyId`status!(state`id;state`status)]
+  ];
+
   state[`status]:`running;
-  state[`metadata;`startedAt]:.z.p;
+  state[`metadata]:state[`metadata],enlist[`startedAt]!enlist .z.p;
 
   state
  }
@@ -86,8 +91,13 @@ strategy.pause:{[state]
   if[not state[`status]~`running;
     '"Cannot pause strategy in status: ",string state[`status]];
 
+  / Log strategy pause
+  if[`log in key `.;
+    .log.event[`INFO;`algo;`strategyPaused;`strategyId!(state`id)]
+  ];
+
   state[`status]:`paused;
-  state[`metadata;`pausedAt]:.z.p;
+  state[`metadata]:state[`metadata],enlist[`pausedAt]!enlist .z.p;
 
   state
  }
@@ -106,7 +116,7 @@ strategy.setMode:{[state;mode]
     '"Invalid mode: ",string[mode],". Must be one of: ",", " sv string types.validModes];
 
   state[`mode]:mode;
-  state[`metadata;`modeSetAt]:.z.p;
+  state[`metadata]:state[`metadata],enlist[`modeSetAt]!enlist .z.p;
 
   state
  }
@@ -137,8 +147,7 @@ strategy.tick:{[state;ctx]
   state:tickFn[state;ctx];
 
   / Increment tick counter
-  state[`metadata;`tickCount]:1+state[`metadata;`tickCount];
-  state[`metadata;`lastTickAt]:.z.p;
+  state[`metadata]:state[`metadata],`tickCount`lastTickAt!(1+state[`metadata;`tickCount];.z.p);
 
   state
  }
@@ -182,7 +191,7 @@ strategy.tearDown:{[state]
 
   / Transition to stopped status
   state[`status]:`stopped;
-  state[`metadata;`stoppedAt]:.z.p;
+  state[`metadata]:state[`metadata],enlist[`stoppedAt]!enlist .z.p;
 
   state
  }

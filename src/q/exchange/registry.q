@@ -1,16 +1,13 @@
 / ============================================================================
 / registry.q - Exchange Implementation Registry
 / ============================================================================
-/
-/ Provides:
+/ // Provides:
 /   - Exchange implementation registration and dispatch
 /   - Dictionary-based polymorphism for exchange operations
 /   - Validation of implementation completeness
-/
-/ Dependencies:
+/ // Dependencies:
 /   - types.q (validation)
-/
-/ Functions:
+/ // Functions:
 /   - register: Register exchange implementation
 /   - getImplementation: Retrieve implementation by exchange name
 /   - listExchanges: List all registered exchanges
@@ -63,6 +60,7 @@ validateImplementation:{[impl]
 / Register exchange implementation
 / @param exchangeName symbol - Exchange name
 / @param impl dict - Implementation dictionary with required functions
+/ @param assetClass symbol - Asset class (optional, default `crypto)
 / @return symbol - Exchange name (for chaining)
 register:{[exchangeName;impl]
   / Validate exchange name

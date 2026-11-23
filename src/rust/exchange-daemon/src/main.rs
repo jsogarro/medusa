@@ -53,20 +53,13 @@ async fn main() -> Result<()> {
     let kdb_password = std::env::var("KDB_PASSWORD").unwrap_or_default();
 
     info!("Starting Medusa exchange daemon");
-    info!(
-        "Connecting to kdb+ at {}:{}",
-        args.kdb_host, args.kdb_port
-    );
+    info!("Connecting to kdb+ at {}:{}", args.kdb_host, args.kdb_port);
 
     // Connect to kdb+ Tickerplant
-    let mut client = KdbClient::connect(
-        &args.kdb_host,
-        args.kdb_port,
-        &args.kdb_user,
-        &kdb_password,
-    )
-    .await
-    .context("Failed to connect to kdb+")?;
+    let mut client =
+        KdbClient::connect(&args.kdb_host, args.kdb_port, &args.kdb_user, &kdb_password)
+            .await
+            .context("Failed to connect to kdb+")?;
 
     // Initialize schema
     info!("Initializing orderbook schema");
@@ -75,7 +68,10 @@ async fn main() -> Result<()> {
         .context("Failed to initialize schema")?;
 
     // Start mock data publisher
-    info!("Starting mock orderbook publisher (interval: {}s)", args.publish_interval);
+    info!(
+        "Starting mock orderbook publisher (interval: {}s)",
+        args.publish_interval
+    );
     let publish_handle = tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(args.publish_interval));
         let mut seq = 0u64;

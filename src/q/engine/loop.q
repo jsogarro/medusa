@@ -4,12 +4,14 @@
 \d .engine
 
 / Loop state
-loop.state:`strategies`harness`running`tickNum`errors!(
+loop.state:`strategies`harness`running`tickNum`errors`tickStartTime`maxTickDuration!(
   ()!();                                           / strategies dict
   (::);                                            / harness (uninitialized)
   0b;                                              / not running
   0;                                               / tick counter
-  ([]timestamp:();strategyId:();phase:();error:()) / errors log
+  ([]timestamp:();strategyId:();phase:();error:()); / errors log
+  0Np;                                             / tick start timestamp
+  5000000000                                       / max tick duration in nanos (5 seconds)
  )
 
 / Register a strategy with the loop
@@ -85,7 +87,7 @@ loop.buildContext:{[harness]
   ctx
  }
 
-/ Execute one tick for one strategy (with error isolation)
+/ Execute one tick for one strategy (with error isolation and timeout detection)
 / @param strategyId symbol - strategy identifier
 / @param ctx dict - execution context
 / @return dict - updated strategy state (or original on error)
@@ -95,8 +97,23 @@ loop.tickOne:{[strategyId;ctx]
   / Only process if strategy is running
   if[not state[`status]~`running;:state];
 
+  / Helper: check if tick has exceeded timeout
+  checkTimeout:{[]
+    elapsed:.z.p - loop.state[`tickStartTime];
+    if[elapsed > loop.state[`maxTickDuration];
+      -1"[WARNING] Tick timeout exceeded: ",string[elapsed % 1000000],"ms (max: ",string[loop.state[`maxTickDuration] % 1000000],"ms)";
+      1b  / Timed out
+    ];
+    0b  / Not timed out
+  };
+
   / Execute pre-tick with error handling
+  phaseStart:.z.p;
   result:@[{(1b;.engine.strategy.preTick[x;y])};(state;ctx);{(0b;x)}];
+  if[checkTimeout[];
+    loop.logError[strategyId;`preTick;"Phase exceeded timeout"];
+    :state;
+  ];
   if[not result 0;
     loop.logError[strategyId;`preTick;result 1];
     :state;
@@ -105,6 +122,10 @@ loop.tickOne:{[strategyId;ctx]
 
   / Execute main tick with error handling
   result:@[{(1b;.engine.strategy.tick[x;y])};(state;ctx);{(0b;x)}];
+  if[checkTimeout[];
+    loop.logError[strategyId;`tick;"Phase exceeded timeout"];
+    :state;
+  ];
   if[not result 0;
     loop.logError[strategyId;`tick;result 1];
     :state;
@@ -113,6 +134,10 @@ loop.tickOne:{[strategyId;ctx]
 
   / Execute post-tick with error handling
   result:@[{(1b;.engine.strategy.postTick[x;y])};(state;ctx);{(0b;x)}];
+  if[checkTimeout[];
+    loop.logError[strategyId;`postTick;"Phase exceeded timeout"];
+    :state;
+  ];
   if[not result 0;
     loop.logError[strategyId;`postTick;result 1];
     :state;
@@ -148,6 +173,9 @@ loop.tick:{
   / Increment tick counter
   loop.state[`tickNum]:loop.state[`tickNum]+1;
 
+  / Record tick start time for timeout detection
+  loop.state[`tickStartTime]:.z.p;
+
   / Build execution context
   ctx:loop.buildContext[loop.state[`harness]];
 
@@ -158,6 +186,12 @@ loop.tick:{
     newState:loop.tickOne[sid;ctx];
     loop.state[`strategies;sid]:newState;
   }[ctx] each strategyIds;
+
+  / Check total tick duration
+  elapsed:.z.p - loop.state[`tickStartTime];
+  if[elapsed > loop.state[`maxTickDuration];
+    -1"[WARNING] Total tick duration exceeded: ",string[elapsed % 1000000],"ms (max: ",string[loop.state[`maxTickDuration] % 1000000],"ms)";
+  ];
 
   / Return tick number
   loop.state[`tickNum]

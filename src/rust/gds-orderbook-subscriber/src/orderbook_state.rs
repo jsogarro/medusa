@@ -152,9 +152,7 @@ impl OrderbookState {
 
     /// Get or create a managed orderbook for a symbol
     pub fn get_or_create(&mut self, symbol: &str) -> &mut ManagedOrderbook {
-        self.books
-            .entry(symbol.to_string())
-            .or_default()
+        self.books.entry(symbol.to_string()).or_default()
     }
 
     /// Get a reference to a managed orderbook

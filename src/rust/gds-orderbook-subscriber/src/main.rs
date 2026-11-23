@@ -89,7 +89,12 @@ async fn main() -> Result<()> {
     let _initial_publisher =
         KdbPublisher::connect(&args.tp_host, args.tp_port, &args.tp_user, &tp_password)
             .await
-            .with_context(|| format!("Failed to connect to Tickerplant at {}:{}", args.tp_host, args.tp_port))?;
+            .with_context(|| {
+                format!(
+                    "Failed to connect to Tickerplant at {}:{}",
+                    args.tp_host, args.tp_port
+                )
+            })?;
 
     info!("Connected to Tickerplant successfully");
 
@@ -100,24 +105,19 @@ async fn main() -> Result<()> {
         info!("Starting subscriber for {}", exchange_config.name);
 
         // Create a separate KdbPublisher connection for this exchange
-        let exchange_publisher = KdbPublisher::connect(
-            &args.tp_host,
-            args.tp_port,
-            &args.tp_user,
-            &tp_password,
-        )
-        .await
-        .with_context(|| format!("Failed to create publisher for {}", exchange_config.name))?;
+        let exchange_publisher =
+            KdbPublisher::connect(&args.tp_host, args.tp_port, &args.tp_user, &tp_password)
+                .await
+                .with_context(|| {
+                    format!("Failed to create publisher for {}", exchange_config.name)
+                })?;
 
         let exchange_config = exchange_config.clone();
         let health_timeout = config.health_timeout();
 
         let handle = tokio::spawn(async move {
-            let mut subscriber = ExchangeSubscriber::new(
-                exchange_config,
-                exchange_publisher,
-                health_timeout,
-            );
+            let mut subscriber =
+                ExchangeSubscriber::new(exchange_config, exchange_publisher, health_timeout);
             if let Err(e) = subscriber.run().await {
                 error!("Exchange subscriber failed: {}", e);
             }
@@ -128,7 +128,9 @@ async fn main() -> Result<()> {
 
     // Wait for shutdown signal
     info!("GDS Orderbook Subscriber running. Press Ctrl+C to stop.");
-    signal::ctrl_c().await.context("Failed to listen for Ctrl+C")?;
+    signal::ctrl_c()
+        .await
+        .context("Failed to listen for Ctrl+C")?;
 
     info!("Shutdown signal received, stopping...");
 

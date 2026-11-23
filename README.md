@@ -105,7 +105,8 @@ rlwrap q src/q/init.q
 make test         # All tests
 make test-rust    # Rust only
 make test-python  # Python only (65 tests)
-make test-q       # q only
+make test-q       # q only (falls back to Docker on license-daemon failure)
+make test-q-docker # q only via Docker
 ```
 
 ## Architecture

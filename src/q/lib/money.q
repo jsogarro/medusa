@@ -165,7 +165,7 @@ mul:{[m;scalar]
 / @param m dict - Money value
 / @param scalar float/long - Divisor
 / @return dict - Quotient in same currency
-div:{[m;scalar]
+set[`.money.div;{[m;scalar]
   requireMoney[m];
 
   if[not (type scalar) in -9 -8 -7 -6h;
@@ -186,7 +186,7 @@ div:{[m;scalar]
   c: m`currency;
   amt: round[m[`amount] % scalar; c];
   `amount`currency!(amt;c)
- };
+ }];
 
 / ========================================
 / Phase 4: Money Comparison Operators
@@ -358,17 +358,17 @@ isZero:{[m]
 / Get absolute value of money
 / @param m dict - Money value
 / @return dict - Money with absolute amount
-abs:{[m]
+set[`.money.abs;{[m]
   requireMoney[m];
   `amount`currency!((::) abs m`amount; m`currency)
- };
+ }];
 
 / Negate money amount
 / @param m dict - Money value
 / @return dict - Money with negated amount
-neg:{[m]
+set[`.money.neg;{[m]
   requireMoney[m];
   `amount`currency!(neg m`amount; m`currency)
- };
+ }];
 
 \d .

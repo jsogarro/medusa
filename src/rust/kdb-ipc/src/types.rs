@@ -118,14 +118,14 @@ pub enum KObject {
     Float(f64),
     Char(u8),
     Symbol(String),
-    Timestamp(i64),  // nanoseconds since 2000-01-01
+    Timestamp(i64), // nanoseconds since 2000-01-01
     Month(i32),
-    Date(i32),       // days since 2000-01-01
-    DateTime(f64),   // days since 2000-01-01 (fractional)
-    Timespan(i64),   // nanoseconds
+    Date(i32),     // days since 2000-01-01
+    DateTime(f64), // days since 2000-01-01 (fractional)
+    Timespan(i64), // nanoseconds
     Minute(i32),
     Second(i32),
-    Time(i32),       // milliseconds since midnight
+    Time(i32), // milliseconds since midnight
 
     // Lists
     BoolList(Vec<bool>),
@@ -149,7 +149,7 @@ pub enum KObject {
     // Composites
     MixedList(Vec<KObject>),
     Dict(Box<KObject>, Box<KObject>), // keys, values
-    Table(Vec<String>, Vec<KObject>),  // column names, column data
+    Table(Vec<String>, Vec<KObject>), // column names, column data
     Error(String),
     Null,
 }

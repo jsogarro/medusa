@@ -19,6 +19,7 @@
 //!   --health-timeout 30
 //! ```
 
+mod alpaca_subscriber;
 mod deduplicator;
 mod exchange_adapter;
 mod subscriber;
@@ -75,7 +76,8 @@ async fn main() -> Result<()> {
     let backfill_enabled = args.backfill
         || env::var("BACKFILL_TRADES")
             .unwrap_or_default()
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
 
     info!("GDS Trade Subscriber starting");
     info!("Tickerplant: {}:{}", args.tp_host, args.tp_port);
@@ -89,6 +91,8 @@ async fn main() -> Result<()> {
         tp_user: args.tp_user.clone(),
         tp_password: tp_password.clone(),
         exchanges: vec![
+            ExchangeConfig::alpaca(),
+            ExchangeConfig::binance(),
             ExchangeConfig::bitstamp(),
             ExchangeConfig::coinbase(),
             ExchangeConfig::kraken(),
@@ -104,7 +108,12 @@ async fn main() -> Result<()> {
         &tp_password,
     )
     .await
-    .with_context(|| format!("Failed to connect to Tickerplant at {}:{}", config.tp_host, config.tp_port))?;
+    .with_context(|| {
+        format!(
+            "Failed to connect to Tickerplant at {}:{}",
+            config.tp_host, config.tp_port
+        )
+    })?;
 
     info!("Connected to Tickerplant successfully");
 
@@ -126,31 +135,51 @@ async fn main() -> Result<()> {
             &tp_password,
         )
         .await
-        .with_context(|| {
-            format!("Failed to create publisher for {}", exchange_config.name)
-        })?;
+        .with_context(|| format!("Failed to create publisher for {}", exchange_config.name))?;
 
         let exchange_cfg = exchange_config.clone();
         let health_timeout = config.health_timeout();
 
-        let task = tokio::spawn(async move {
-            let mut subscriber = match subscriber::TradeSubscriber::new(
-                exchange_cfg,
-                exchange_publisher,
-                health_timeout,
-                backfill_enabled,
-            ) {
-                Ok(sub) => sub,
-                Err(e) => {
-                    error!("Failed to create trade subscriber: {}", e);
-                    return;
-                }
-            };
+        let task = if exchange_cfg.name == "alpaca" {
+            tokio::spawn(async move {
+                let mut subscriber = alpaca_subscriber::AlpacaTradeSubscriber::new(
+                    exchange_cfg,
+                    exchange_publisher,
+                    health_timeout,
+                );
 
-            if let Err(e) = subscriber.run().await {
-                error!("Subscriber failed for {}: {}", subscriber.exchange_name(), e);
-            }
-        });
+                if let Err(e) = subscriber.run().await {
+                    error!(
+                        "Subscriber failed for {}: {}",
+                        subscriber.exchange_name(),
+                        e
+                    );
+                }
+            })
+        } else {
+            tokio::spawn(async move {
+                let mut subscriber = match subscriber::TradeSubscriber::new(
+                    exchange_cfg,
+                    exchange_publisher,
+                    health_timeout,
+                    backfill_enabled,
+                ) {
+                    Ok(sub) => sub,
+                    Err(e) => {
+                        error!("Failed to create trade subscriber: {}", e);
+                        return;
+                    }
+                };
+
+                if let Err(e) = subscriber.run().await {
+                    error!(
+                        "Subscriber failed for {}: {}",
+                        subscriber.exchange_name(),
+                        e
+                    );
+                }
+            })
+        };
 
         tasks.push(task);
     }
