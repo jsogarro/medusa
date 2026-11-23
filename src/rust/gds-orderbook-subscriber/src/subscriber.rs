@@ -14,6 +14,8 @@ pub struct ExchangeSubscriber {
     config: ExchangeConfig,
     publisher: KdbPublisher,
     health_timeout: Duration,
+    /// Orderbook publishes that failed (the exchange connection is kept regardless).
+    publish_failures: u64,
 }
 
 impl ExchangeSubscriber {
@@ -23,6 +25,7 @@ impl ExchangeSubscriber {
             config,
             publisher,
             health_timeout,
+            publish_failures: 0,
         }
     }
 
@@ -35,9 +38,15 @@ impl ExchangeSubscriber {
 
             // The loop returns Ok when the server closes, the stream ends or the
             // connection goes stale; every exit means the book has stopped updating.
+            let started = tokio::time::Instant::now();
             match self.subscribe_loop().await {
                 Ok(()) => warn!("{} connection ended, reconnecting", self.config.name),
                 Err(e) => error!("{} subscriber error: {}", self.config.name, e),
+            }
+            // A session that stayed up for a full health window was healthy: the
+            // next drop starts again from the minimum delay.
+            if started.elapsed() >= self.health_timeout {
+                backoff.reset();
             }
             let delay = backoff.next_delay();
             warn!("Reconnecting in {:?}", delay);
@@ -121,7 +130,7 @@ impl ExchangeSubscriber {
                                 asks.len()
                             );
                             state.apply_snapshot(&symbol, bids, asks, sequence);
-                            self.publish_orderbook(&state, &symbol).await?;
+                            self.publish_orderbook(&state, &symbol).await;
                         }
                         Ok(ExchangeMessage::Delta {
                             symbol,
@@ -149,7 +158,7 @@ impl ExchangeSubscriber {
                                     .await?;
                             }
 
-                            self.publish_orderbook(&state, &symbol).await?;
+                            self.publish_orderbook(&state, &symbol).await;
                         }
                         Ok(ExchangeMessage::Gap) => {
                             warn!(
@@ -224,7 +233,7 @@ impl ExchangeSubscriber {
                         snapshot.asks,
                         snapshot.sequence,
                     );
-                    self.publish_orderbook(state, &snapshot.symbol).await?;
+                    self.publish_orderbook(state, &snapshot.symbol).await;
                 }
                 Err(e) => {
                     error!("{}", e);
@@ -252,24 +261,27 @@ impl ExchangeSubscriber {
             snapshot.asks,
             snapshot.sequence,
         );
-        self.publish_orderbook(state, &snapshot.symbol).await?;
+        self.publish_orderbook(state, &snapshot.symbol).await;
         Ok(())
     }
 
-    /// Publish orderbook to Tickerplant
-    async fn publish_orderbook(&mut self, state: &OrderbookState, symbol: &str) -> Result<()> {
-        if let Some(ob) = state.get_snapshot(symbol, &self.config.name, 25) {
-            self.publisher
-                .publish_orderbook(&ob)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to publish {} {} orderbook to Tickerplant",
-                        self.config.name, symbol
-                    )
-                })?;
+    /// Publish orderbook to Tickerplant. A failure is logged and counted but never
+    /// ends the exchange session: the book stays current and the publisher's own
+    /// reconnect/backoff recovers the tickerplant link.
+    async fn publish_orderbook(&mut self, state: &OrderbookState, symbol: &str) {
+        let Some(ob) = state.get_snapshot(symbol, &self.config.name, 25) else {
+            return;
+        };
+        if let Err(e) = self.publisher.publish_orderbook(&ob).await {
+            self.publish_failures += 1;
+            // Logged at 1, 2, 4, 8, ... so an outage does not flood the log.
+            if self.publish_failures.is_power_of_two() {
+                warn!(
+                    "{} {} orderbook publish failed ({} so far): {}",
+                    self.config.name, symbol, self.publish_failures, e
+                );
+            }
         }
-        Ok(())
     }
 }
 
@@ -407,5 +419,101 @@ mod tests {
             "diffs sent between the snapshot and the subscription are lost unless the \
              subscription comes first, got {first:?}"
         );
+    }
+
+    fn bitstamp_config(port: u16) -> ExchangeConfig {
+        ExchangeConfig {
+            name: "bitstamp".to_string(),
+            ws_url: format!("ws://127.0.0.1:{}", port),
+            rest_url: "http://127.0.0.1:1".to_string(),
+            symbols: vec![],
+            enabled: true,
+        }
+    }
+
+    const BITSTAMP_DIFF: &str = r#"{"event":"data","channel":"diff_order_book_btcusd","data":{"microtimestamp":"5","bids":[["100","1"]],"asks":[["101","1"]]}}"#;
+
+    #[tokio::test]
+    async fn backoff_resets_after_a_session_that_stayed_healthy() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // Each session streams for 600ms (health timeout is 300ms), then closes.
+            while let Ok((sock, _)) = listener.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut ws) = tokio_tungstenite::accept_async(sock).await {
+                        let _ = tx.send(());
+                        for _ in 0..12 {
+                            let _ = ws.send(Message::Text("{}".into())).await;
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                        let _ = ws.close(None).await;
+                    }
+                });
+            }
+        });
+        let publisher = KdbPublisher::lazy("127.0.0.1", 1, "", "");
+        let mut sub =
+            ExchangeSubscriber::new(bitstamp_config(port), publisher, Duration::from_millis(300));
+        let run = tokio::spawn(async move { sub.run().await });
+
+        // With a reset every reconnect waits 1s, so the third session starts at
+        // ~3.2s; without it the delay doubles and the third starts at ~4.2s.
+        let started = tokio::time::Instant::now();
+        let mut third = Ok(Some(()));
+        for _ in 0..3 {
+            third = tokio::time::timeout_at(started + Duration::from_millis(3700), rx.recv()).await;
+            if !matches!(third, Ok(Some(()))) {
+                break;
+            }
+        }
+        run.abort();
+        assert!(
+            matches!(third, Ok(Some(()))),
+            "backoff must restart from its minimum after a healthy session"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_failure_keeps_the_exchange_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                if let Ok(mut ws) = tokio_tungstenite::accept_async(sock).await {
+                    let _ = ws.send(Message::Text(BITSTAMP_DIFF.into())).await;
+                    held.push(ws);
+                    let _ = tx.send(());
+                }
+            }
+        });
+        // Nothing listens on port 1: every publish fails.
+        let publisher = KdbPublisher::lazy("127.0.0.1", 1, "", "");
+        let mut sub =
+            ExchangeSubscriber::new(bitstamp_config(port), publisher, Duration::from_secs(30));
+        let run = tokio::spawn(async move { sub.run().await });
+
+        rx.recv().await.expect("first connection");
+        let second = tokio::time::timeout(Duration::from_millis(2500), rx.recv()).await;
+        run.abort();
+        assert!(
+            second.is_err(),
+            "a tickerplant failure must not tear down the exchange connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_failure_is_counted_not_returned() {
+        let publisher = KdbPublisher::lazy("127.0.0.1", 1, "", "");
+        let mut sub =
+            ExchangeSubscriber::new(bitstamp_config(1), publisher, Duration::from_secs(30));
+        let mut state = OrderbookState::new();
+        state.apply_snapshot("BTCUSD", vec![[100.0, 1.0]], vec![[101.0, 1.0]], 1);
+        sub.publish_orderbook(&state, "BTCUSD").await;
+        assert_eq!(sub.publish_failures, 1);
     }
 }
