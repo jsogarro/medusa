@@ -182,6 +182,23 @@ describe('kdb:subscribe', () => {
   })
 })
 
+describe('rate limits on state-changing channels', () => {
+  it('limits a burst of cancels', async () => {
+    h.respond = () => ({ status: 'cancelled' })
+    const ok: boolean[] = []
+    for (let i = 0; i < 40; i++) ok.push((await call('kdb:cancelOrder', 'ORD_1', 'alpaca')).success)
+    expect(ok.filter(Boolean).length).toBeGreaterThan(0)
+    expect(ok.filter(Boolean).length).toBeLessThan(40)
+  })
+
+  it('limits a burst of strategy controls', async () => {
+    const ok: boolean[] = []
+    for (let i = 0; i < 40; i++) ok.push((await call('kdb:strategyControl', 'simpleMM', 'pause')).success)
+    expect(ok.filter(Boolean).length).toBeGreaterThan(0)
+    expect(ok.filter(Boolean).length).toBeLessThan(40)
+  })
+})
+
 describe('kdb:strategyControl', () => {
   it('sends the strategy name as a q symbol', async () => {
     await call('kdb:strategyControl', 'simpleMM', 'pause')
@@ -234,6 +251,22 @@ describe('setupIpcHandlers', () => {
 })
 
 describe('kdb updates', () => {
+  it('skip destroyed windows instead of throwing in the main process', () => {
+    const dead = {
+      isDestroyed: () => true,
+      webContents: {
+        send: vi.fn(() => {
+          throw new Error('Object has been destroyed')
+        })
+      }
+    }
+    h.windows = [dead, win]
+    win.webContents.send.mockClear()
+    expect(() => h.clients[h.clients.length - 2].emit('update', 'order', { orderId: 'x' })).not.toThrow()
+    expect(dead.webContents.send).not.toHaveBeenCalled()
+    expect(win.webContents.send).toHaveBeenCalledTimes(1)
+  })
+
   it('are delivered to every open window, not just the one that connected', () => {
     const popout = { isDestroyed: () => false, webContents: { send: vi.fn() } }
     h.windows = [win, popout]
