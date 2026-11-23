@@ -51,6 +51,13 @@ describe('validateOrder', () => {
     expect(() => validateOrder({ ...base, quantity: 1e-9 })).toThrow(/quantity/)
   })
 
+  it('rejects values that are not exactly representable at 6 dp instead of rounding them', () => {
+    expect(() => validateOrder({ ...base, quantity: 0.0000015 })).toThrow(/quantity.*6 decimal/)
+    expect(() => validateOrder({ ...base, price: 100.1234567 })).toThrow(/price.*6 decimal/)
+    expect(validateOrder({ ...base, quantity: 0.000001 }).quantity).toBe(1)
+    expect(validateOrder({ ...base, price: 123456789.123457 }).price).toBe(123456789123457)
+  })
+
   it('rejects out-of-bounds values', () => {
     expect(() => validateOrder({ ...base, quantity: 1e12 })).toThrow(/quantity/)
     expect(() => validateOrder({ ...base, price: 1e12 })).toThrow(/price/)

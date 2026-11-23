@@ -33,6 +33,10 @@ function toFixedPositive(value: unknown, fieldName: string, scale: number): numb
   if (fixed <= 0) {
     throw new Error(`Invalid ${fieldName}: ${value} rounds to zero at 6 decimal places`)
   }
+  // Tolerate binary-float noise (0.1 + 0.2) but never round a real digit away (0.0000015).
+  if (Math.abs(value * scale - fixed) > fixed * 1e-12 + 1e-9) {
+    throw new Error(`Invalid ${fieldName}: ${value} has more than 6 decimal places`)
+  }
   return fixed
 }
 
