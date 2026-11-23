@@ -20,7 +20,6 @@ use rand::Rng;
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, trace, warn};
 
@@ -30,9 +29,6 @@ type HmacSha256 = Hmac<Sha256>;
 const LEGACY_BASE_URL: &str = "https://api.exchange.coinbase.com";
 const ADVANCED_BASE_URL: &str = "https://api.coinbase.com";
 const ADVANCED_HOST: &str = "api.coinbase.com";
-
-// Security: Atomic counter for nonce uniqueness
-static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Coinbase exchange client
 ///
@@ -141,27 +137,13 @@ impl CoinbaseClient {
         ))
     }
 
-    /// Get current timestamp with uniqueness guarantee
-    ///
-    /// # Security
-    /// Ensures strictly increasing timestamps to prevent nonce collisions.
+    /// Current Unix time in seconds. Coinbase validates this against its own
+    /// clock (about 30s), so it must track the wall clock; it is not a nonce.
     fn get_timestamp() -> u64 {
-        let now = std::time::SystemTime::now()
+        std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
-
-        // Ensure strictly increasing timestamps
-        loop {
-            let prev = NONCE_COUNTER.load(Ordering::Acquire);
-            let next = now.max(prev + 1);
-            if NONCE_COUNTER
-                .compare_exchange(prev, next, Ordering::Release, Ordering::Acquire)
-                .is_ok()
-            {
-                return next;
-            }
-        }
+            .as_secs()
     }
 
     /// Build the Advanced Trade create-order body. Coinbase deduplicates on
@@ -1719,5 +1701,22 @@ mod tests {
         assert_eq!(f("received", None).unwrap(), OrderStatus::Pending);
         assert_eq!(f("rejected", None).unwrap(), OrderStatus::Rejected);
         assert!(f("mystery", None).is_err());
+    }
+
+    #[test]
+    fn timestamp_tracks_wall_clock_under_burst() {
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let last = (0..500)
+            .map(|_| CoinbaseClient::get_timestamp())
+            .last()
+            .unwrap();
+        assert!(
+            last <= wall + 2,
+            "timestamp ran {}s ahead of the clock",
+            last - wall
+        );
     }
 }
