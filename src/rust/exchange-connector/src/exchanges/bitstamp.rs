@@ -113,6 +113,47 @@ impl BitstampClient {
         Ok((endpoint, fields))
     }
 
+    /// Convert one `open_orders` row. Bitstamp encodes side as "0" (buy) or
+    /// "1" (sell); anything else is an error, not a sell.
+    fn open_order_from(
+        o: BitstampOrderResponse,
+        pair: Option<&str>,
+    ) -> Result<Order, ExchangeError> {
+        let side = match o.side.as_str() {
+            "0" => Side::Buy,
+            "1" => Side::Sell,
+            other => {
+                return Err(ExchangeError::Other(format!(
+                    "Unrecognized Bitstamp order side '{other}'"
+                )))
+            }
+        };
+        let price: f64 = o.price.parse().unwrap_or(0.0);
+        let quantity: f64 = o.amount.parse().unwrap_or(0.0);
+        let created_at = o
+            .datetime
+            .as_ref()
+            .and_then(|dt| DateTime::parse_from_rfc3339(dt).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+
+        Ok(Order {
+            id: Some(o.id),
+            pair: pair.map(String::from).unwrap_or_default(),
+            exchange: "bitstamp".to_string(),
+            side,
+            price: Some(price),
+            quantity,
+            order_type: OrderType::Limit,
+            status: OrderStatus::Open,
+            client_order_id: None,
+            filled_quantity: 0.0,
+            average_price: None,
+            created_at,
+            updated_at: created_at,
+        })
+    }
+
     /// Get current nonce with microsecond precision and uniqueness guarantee
     ///
     /// # Security
@@ -388,34 +429,8 @@ impl ExchangeClient for BitstampClient {
 
         let orders = data
             .into_iter()
-            .map(|o| {
-                let side = if o.side == "0" { Side::Buy } else { Side::Sell };
-                let price: f64 = o.price.parse().unwrap_or(0.0);
-                let quantity: f64 = o.amount.parse().unwrap_or(0.0);
-                let created_at = o
-                    .datetime
-                    .as_ref()
-                    .and_then(|dt| DateTime::parse_from_rfc3339(dt).ok())
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(Utc::now);
-
-                Order {
-                    id: Some(o.id),
-                    pair: pair.map(String::from).unwrap_or_default(),
-                    exchange: "bitstamp".to_string(),
-                    side,
-                    price: Some(price),
-                    quantity,
-                    order_type: OrderType::Limit,
-                    status: OrderStatus::Open,
-                    client_order_id: None,
-                    filled_quantity: 0.0,
-                    average_price: None,
-                    created_at,
-                    updated_at: created_at,
-                }
-            })
-            .collect();
+            .map(|o| Self::open_order_from(o, pair))
+            .collect::<Result<Vec<_>, ExchangeError>>()?;
 
         Ok(orders)
     }
@@ -604,5 +619,21 @@ mod tests {
         assert_eq!(endpoint, "/sell/market/btcusd/");
         assert_eq!(find(&f, "price"), None);
         assert_eq!(find(&f, "client_order_id"), None);
+    }
+
+    fn open_row(side: &str) -> BitstampOrderResponse {
+        serde_json::from_value(serde_json::json!({
+            "id": "1", "type": side, "price": "50000", "amount": "1"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn open_order_from_rejects_unknown_side() {
+        let buy = BitstampClient::open_order_from(open_row("0"), None).unwrap();
+        let sell = BitstampClient::open_order_from(open_row("1"), None).unwrap();
+        assert_eq!((buy.side, sell.side), (Side::Buy, Side::Sell));
+        assert!(BitstampClient::open_order_from(open_row("2"), None).is_err());
+        assert!(BitstampClient::open_order_from(open_row(""), None).is_err());
     }
 }

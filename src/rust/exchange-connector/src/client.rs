@@ -1,6 +1,6 @@
 //! Exchange client trait and error types
 
-use crate::types::{Balance, Order, OrderBook, OrderType};
+use crate::types::{Balance, Order, OrderBook, OrderType, Side};
 use async_trait::async_trait;
 use std::time::Duration;
 use thiserror::Error;
@@ -26,6 +26,35 @@ pub(crate) fn build_http_client(request_timeout: Duration) -> reqwest::Client {
 
 pub(crate) fn http_client() -> reqwest::Client {
     build_http_client(REQUEST_TIMEOUT)
+}
+
+/// Parse a venue's side string (case-insensitive); anything else is an error
+/// rather than a guess.
+pub(crate) fn parse_side(s: &str) -> Result<Side, ExchangeError> {
+    match s.to_ascii_lowercase().as_str() {
+        "buy" => Ok(Side::Buy),
+        "sell" => Ok(Side::Sell),
+        _ => Err(ExchangeError::Other(format!(
+            "Unrecognized order side '{s}'"
+        ))),
+    }
+}
+
+/// Parse a venue's order type string (case-insensitive); unsupported types
+/// are an error rather than being reported as limit orders.
+pub(crate) fn parse_order_type(s: &str) -> Result<OrderType, ExchangeError> {
+    match s.to_ascii_lowercase().as_str() {
+        "limit" => Ok(OrderType::Limit),
+        "market" => Ok(OrderType::Market),
+        _ => Err(ExchangeError::Other(format!(
+            "Unrecognized order type '{s}'"
+        ))),
+    }
+}
+
+/// A venue order status we do not recognise is an error, never a guess.
+pub(crate) fn unknown_status(s: &str) -> ExchangeError {
+    ExchangeError::Other(format!("Unrecognized order status '{s}'"))
 }
 
 /// Reject orders that must never reach a venue: non-finite, non-positive or
@@ -153,8 +182,20 @@ pub trait ExchangeClient: Send + Sync {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::types::{OrderStatus, Side};
+    use crate::types::OrderStatus;
     use chrono::Utc;
+
+    #[test]
+    fn parse_side_and_type_reject_unknown_values() {
+        assert_eq!(parse_side("BUY").unwrap(), Side::Buy);
+        assert_eq!(parse_side("sell").unwrap(), Side::Sell);
+        assert_eq!(parse_order_type("Limit").unwrap(), OrderType::Limit);
+        assert_eq!(parse_order_type("MARKET").unwrap(), OrderType::Market);
+        for bad in ["", "short", "0", "BUY ", "stop_limit", "stop"] {
+            assert!(parse_side(bad).is_err(), "side {bad:?}");
+            assert!(parse_order_type(bad).is_err(), "type {bad:?}");
+        }
+    }
 
     pub(crate) fn sample_order() -> Order {
         Order {

@@ -3,7 +3,8 @@
 //! REST API documentation: https://docs.kraken.com/rest/
 
 use crate::client::{
-    http_client, ExchangeClient, ExchangeError, MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
+    http_client, parse_order_type, parse_side, unknown_status, ExchangeClient, ExchangeError,
+    MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
 };
 use crate::rate_limiter::RateLimiter;
 use crate::types::{Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side};
@@ -97,6 +98,33 @@ impl KrakenClient {
         let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
         Ok(signature)
+    }
+
+    /// Convert one open-order row; an unknown side or type is an error.
+    fn open_order_from(order_id: String, info: KrakenOrderInfo) -> Result<Order, ExchangeError> {
+        let side = parse_side(&info.descr.side)?;
+        let order_type = parse_order_type(&info.descr.ordertype)?;
+        let status = match info.status.as_str() {
+            "open" => OrderStatus::Open,
+            "pending" => OrderStatus::Pending,
+            other => return Err(unknown_status(other)),
+        };
+
+        Ok(Order {
+            id: Some(order_id),
+            pair: info.descr.pair.clone(),
+            exchange: "kraken".to_string(),
+            side,
+            price: info.descr.price.parse().ok(),
+            quantity: info.vol.parse().unwrap_or(0.0),
+            order_type,
+            status,
+            client_order_id: None,
+            filled_quantity: info.vol_exec.parse().unwrap_or(0.0),
+            average_price: None,
+            created_at: DateTime::from_timestamp(info.opentm as i64, 0).unwrap_or_else(Utc::now),
+            updated_at: Utc::now(),
+        })
     }
 
     /// Build the `AddOrder` form fields (without signature).
@@ -247,7 +275,6 @@ struct KrakenOrderInfo {
     descr: KrakenOrderDescr,
     vol: String,
     vol_exec: String,
-    #[allow(dead_code)]
     status: String,
     opentm: f64,
 }
@@ -457,36 +484,8 @@ impl ExchangeClient for KrakenClient {
         let orders = result
             .open
             .into_iter()
-            .map(|(order_id, info)| {
-                let side = if info.descr.side == "buy" {
-                    Side::Buy
-                } else {
-                    Side::Sell
-                };
-                let order_type = match info.descr.ordertype.as_str() {
-                    "limit" => OrderType::Limit,
-                    "market" => OrderType::Market,
-                    _ => OrderType::Limit,
-                };
-
-                Order {
-                    id: Some(order_id),
-                    pair: info.descr.pair.clone(),
-                    exchange: "kraken".to_string(),
-                    side,
-                    price: info.descr.price.parse().ok(),
-                    quantity: info.vol.parse().unwrap_or(0.0),
-                    order_type,
-                    status: OrderStatus::Open,
-                    client_order_id: None,
-                    filled_quantity: info.vol_exec.parse().unwrap_or(0.0),
-                    average_price: None,
-                    created_at: DateTime::from_timestamp(info.opentm as i64, 0)
-                        .unwrap_or_else(Utc::now),
-                    updated_at: Utc::now(),
-                }
-            })
-            .collect();
+            .map(|(order_id, info)| Self::open_order_from(order_id, info))
+            .collect::<Result<Vec<_>, ExchangeError>>()?;
 
         Ok(orders)
     }
@@ -665,5 +664,40 @@ mod tests {
     fn build_order_form_without_client_id_omits_field() {
         let f = KrakenClient::build_order_form(&crate::client::tests::sample_order(), 1).unwrap();
         assert_eq!(find(&f, "cl_ord_id"), None);
+    }
+
+    fn open_info(side: &str, ty: &str) -> KrakenOrderInfo {
+        open_info_with_status(side, ty, "open")
+    }
+
+    fn open_info_with_status(side: &str, ty: &str, status: &str) -> KrakenOrderInfo {
+        serde_json::from_value(serde_json::json!({
+            "descr": {"pair": "XBTUSD", "type": side, "ordertype": ty, "price": "50000"},
+            "vol": "1", "vol_exec": "0", "status": status, "opentm": 1_700_000_000.0
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn open_order_from_rejects_unknown_side_or_type() {
+        let ok = KrakenClient::open_order_from("O1".into(), open_info("sell", "market")).unwrap();
+        assert_eq!((ok.side, ok.order_type), (Side::Sell, OrderType::Market));
+        assert!(KrakenClient::open_order_from("O1".into(), open_info("short", "limit")).is_err());
+        assert!(KrakenClient::open_order_from("O1".into(), open_info("buy", "stop-loss")).is_err());
+    }
+
+    #[test]
+    fn open_order_from_maps_status_and_rejects_unknown() {
+        let pending = KrakenClient::open_order_from(
+            "O1".into(),
+            open_info_with_status("buy", "limit", "pending"),
+        )
+        .unwrap();
+        assert_eq!(pending.status, OrderStatus::Pending);
+        assert!(KrakenClient::open_order_from(
+            "O1".into(),
+            open_info_with_status("buy", "limit", "closed")
+        )
+        .is_err());
     }
 }

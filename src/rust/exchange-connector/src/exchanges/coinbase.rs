@@ -6,7 +6,8 @@
 //! - Advanced Trade: https://docs.cdp.coinbase.com/advanced-trade/docs
 
 use crate::client::{
-    http_client, ExchangeClient, ExchangeError, MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
+    http_client, parse_order_type, parse_side, unknown_status, ExchangeClient, ExchangeError,
+    MAX_PRICE, MAX_QUANTITY, MIN_POSITIVE,
 };
 use crate::rate_limiter::RateLimiter;
 use crate::types::{Balance, Order, OrderBook, OrderStatus, OrderType, PriceLevel, Side};
@@ -234,6 +235,31 @@ impl CoinbaseClient {
             product_id: Self::normalize_pair(&order.pair),
             price: order.price.map(|p| p.to_string()),
             size: Some(order.quantity.to_string()),
+        })
+    }
+
+    fn advanced_status(s: &str) -> Result<OrderStatus, ExchangeError> {
+        Ok(match s.to_uppercase().as_str() {
+            "OPEN" => OrderStatus::Open,
+            "PENDING" => OrderStatus::Pending,
+            "FILLED" => OrderStatus::Filled,
+            "CANCELLED" => OrderStatus::Cancelled,
+            "EXPIRED" => OrderStatus::Expired,
+            "FAILED" | "REJECTED" => OrderStatus::Rejected,
+            other => return Err(unknown_status(other)),
+        })
+    }
+
+    /// Legacy `done` only means the order left the book; `done_reason` says
+    /// whether it filled or was cancelled.
+    fn legacy_status(s: &str, done_reason: Option<&str>) -> Result<OrderStatus, ExchangeError> {
+        Ok(match (s, done_reason) {
+            ("open" | "active", _) => OrderStatus::Open,
+            ("pending" | "received", _) => OrderStatus::Pending,
+            ("rejected", _) => OrderStatus::Rejected,
+            ("done", Some("filled")) => OrderStatus::Filled,
+            ("done", Some("canceled")) => OrderStatus::Cancelled,
+            _ => return Err(unknown_status(&format!("{s}/{done_reason:?}"))),
         })
     }
 
@@ -608,6 +634,8 @@ struct CoinbaseOrderResponse {
     status: String,
     filled_size: String,
     executed_value: Option<String>,
+    #[serde(default)]
+    done_reason: Option<String>,
     created_at: String,
 }
 
@@ -867,32 +895,16 @@ impl ExchangeClient for CoinbaseClient {
                 .orders
                 .into_iter()
                 .map(|o| {
-                    let side = if o.side.to_uppercase() == "BUY" {
-                        Side::Buy
-                    } else {
-                        Side::Sell
-                    };
-                    let order_type = match o.order_type.to_uppercase().as_str() {
-                        "LIMIT" => OrderType::Limit,
-                        "MARKET" => OrderType::Market,
-                        _ => OrderType::Limit,
-                    };
-                    let status = match o.status.to_uppercase().as_str() {
-                        "OPEN" => OrderStatus::Open,
-                        "PENDING" => OrderStatus::Pending,
-                        "FILLED" => OrderStatus::Filled,
-                        "CANCELLED" => OrderStatus::Cancelled,
-                        "EXPIRED" => OrderStatus::Expired,
-                        "FAILED" | "REJECTED" => OrderStatus::Rejected,
-                        _ => OrderStatus::Open,
-                    };
+                    let side = parse_side(&o.side)?;
+                    let order_type = parse_order_type(&o.order_type)?;
+                    let status = Self::advanced_status(&o.status)?;
 
                     // Extract price from order_configuration
                     let price = Self::extract_order_limit_price(&o.order_configuration);
                     let quantity = Self::extract_order_base_size(&o.order_configuration)
                         .unwrap_or_else(|| o.filled_size.parse().unwrap_or(0.0));
 
-                    Order {
+                    Ok(Order {
                         id: Some(o.order_id),
                         pair: o.product_id.replace('-', "/"),
                         exchange: "coinbase".to_string(),
@@ -909,9 +921,9 @@ impl ExchangeClient for CoinbaseClient {
                             .map(|dt| dt.with_timezone(&Utc))
                             .unwrap_or_else(Utc::now),
                         updated_at: Utc::now(),
-                    }
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, ExchangeError>>()?;
 
             return Ok(orders);
         }
@@ -955,25 +967,11 @@ impl ExchangeClient for CoinbaseClient {
         let orders = data
             .into_iter()
             .map(|o| {
-                let side = if o.side == "buy" {
-                    Side::Buy
-                } else {
-                    Side::Sell
-                };
-                let order_type = match o.order_type.as_str() {
-                    "limit" => OrderType::Limit,
-                    "market" => OrderType::Market,
-                    _ => OrderType::Limit,
-                };
-                let status = match o.status.as_str() {
-                    "open" => OrderStatus::Open,
-                    "pending" => OrderStatus::Pending,
-                    "done" => OrderStatus::Filled,
-                    "rejected" => OrderStatus::Rejected,
-                    _ => OrderStatus::Open,
-                };
+                let side = parse_side(&o.side)?;
+                let order_type = parse_order_type(&o.order_type)?;
+                let status = Self::legacy_status(&o.status, o.done_reason.as_deref())?;
 
-                Order {
+                Ok(Order {
                     id: Some(o.id),
                     pair: o.product_id.replace('-', "/"),
                     exchange: "coinbase".to_string(),
@@ -1000,9 +998,9 @@ impl ExchangeClient for CoinbaseClient {
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or_else(Utc::now),
                     updated_at: Utc::now(),
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ExchangeError>>()?;
 
         Ok(orders)
     }
@@ -1029,25 +1027,9 @@ impl ExchangeClient for CoinbaseClient {
             let data: AdvancedTradeOrderResponse = serde_json::from_str(&body)?;
             let o = data.order;
 
-            let side = if o.side.to_uppercase() == "BUY" {
-                Side::Buy
-            } else {
-                Side::Sell
-            };
-            let order_type = match o.order_type.to_uppercase().as_str() {
-                "LIMIT" => OrderType::Limit,
-                "MARKET" => OrderType::Market,
-                _ => OrderType::Limit,
-            };
-            let status = match o.status.to_uppercase().as_str() {
-                "OPEN" => OrderStatus::Open,
-                "PENDING" => OrderStatus::Pending,
-                "FILLED" => OrderStatus::Filled,
-                "CANCELLED" => OrderStatus::Cancelled,
-                "EXPIRED" => OrderStatus::Expired,
-                "FAILED" | "REJECTED" => OrderStatus::Rejected,
-                _ => OrderStatus::Open,
-            };
+            let side = parse_side(&o.side)?;
+            let order_type = parse_order_type(&o.order_type)?;
+            let status = Self::advanced_status(&o.status)?;
 
             // Extract price from order_configuration
             let price = Self::extract_order_limit_price(&o.order_configuration);
@@ -1101,23 +1083,9 @@ impl ExchangeClient for CoinbaseClient {
         let body = response.text().await?;
         let o: CoinbaseOrderResponse = serde_json::from_str(&body)?;
 
-        let side = if o.side == "buy" {
-            Side::Buy
-        } else {
-            Side::Sell
-        };
-        let order_type = match o.order_type.as_str() {
-            "limit" => OrderType::Limit,
-            "market" => OrderType::Market,
-            _ => OrderType::Limit,
-        };
-        let status = match o.status.as_str() {
-            "open" => OrderStatus::Open,
-            "pending" => OrderStatus::Pending,
-            "done" => OrderStatus::Filled,
-            "rejected" => OrderStatus::Rejected,
-            _ => OrderStatus::Open,
-        };
+        let side = parse_side(&o.side)?;
+        let order_type = parse_order_type(&o.order_type)?;
+        let status = Self::legacy_status(&o.status, o.done_reason.as_deref())?;
 
         Ok(Order {
             id: Some(o.id),
@@ -1723,5 +1691,33 @@ mod tests {
         let req = CoinbaseClient::build_legacy_order_request(&order).unwrap();
         assert_eq!(req.client_oid.as_deref(), Some("my-id-1"));
         assert_eq!(req.order_type, "limit");
+    }
+
+    #[test]
+    fn advanced_status_unknown_is_not_open() {
+        assert_eq!(
+            CoinbaseClient::advanced_status("OPEN").unwrap(),
+            OrderStatus::Open
+        );
+        assert_eq!(
+            CoinbaseClient::advanced_status("filled").unwrap(),
+            OrderStatus::Filled
+        );
+        assert!(CoinbaseClient::advanced_status("CANCEL_QUEUED").is_err());
+        assert!(CoinbaseClient::advanced_status("").is_err());
+    }
+
+    #[test]
+    fn legacy_done_status_depends_on_done_reason() {
+        let f = |s, r| CoinbaseClient::legacy_status(s, r);
+        assert_eq!(f("done", Some("filled")).unwrap(), OrderStatus::Filled);
+        assert_eq!(f("done", Some("canceled")).unwrap(), OrderStatus::Cancelled);
+        assert!(f("done", None).is_err());
+        assert!(f("done", Some("mystery")).is_err());
+        assert_eq!(f("active", None).unwrap(), OrderStatus::Open);
+        assert_eq!(f("open", None).unwrap(), OrderStatus::Open);
+        assert_eq!(f("received", None).unwrap(), OrderStatus::Pending);
+        assert_eq!(f("rejected", None).unwrap(), OrderStatus::Rejected);
+        assert!(f("mystery", None).is_err());
     }
 }
