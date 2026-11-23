@@ -60,7 +60,7 @@ function handle(channel: string, fn: (event: IpcMainInvokeEvent, ...args: any[])
   })
 }
 
-export function setupIpcHandlers(mainWindow: BrowserWindow): void {
+export function setupIpcHandlers(): void {
   const rateLimiter = createRateLimiter()
   const limit = (channel: string) => {
     if (!rateLimiter.checkLimit(channel)) {
@@ -88,7 +88,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
       tpClient = new KdbClient(config.tp)
       await tpClient.connect()
-      attachTpUpdateForwarding(mainWindow, tpClient)
+      attachTpUpdateForwarding(tpClient)
 
       rdbClient = new KdbClient(config.rdb)
       await rdbClient.connect()
@@ -190,8 +190,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     return { success: true, data: { orderId, status } }
   })
 
-  // Setup kdb+ update forwarding (re-points an existing TP client at this window)
-  setupKdbUpdates(mainWindow)
+  // Setup kdb+ update forwarding (re-attaches an existing TP client when handlers are set up again)
+  if (tpClient) attachTpUpdateForwarding(tpClient)
 
   // Health check endpoint
   handle('system:health', async () => ({
@@ -216,18 +216,13 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   }))
 }
 
-function setupKdbUpdates(mainWindow: BrowserWindow): void {
-  if (tpClient) {
-    attachTpUpdateForwarding(mainWindow, tpClient)
-  }
-}
-
-function attachTpUpdateForwarding(mainWindow: BrowserWindow, client: KdbClient): void {
+/** Updates go to every open window: pop-outs share this connection and never connect themselves. */
+function attachTpUpdateForwarding(client: KdbClient): void {
   removeTpUpdateForwarder?.()
 
   const listener = (table: string, data: any) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('kdb:update', { table, data })
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('kdb:update', { table, data })
     }
   }
 

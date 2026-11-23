@@ -4,6 +4,7 @@ const h = vi.hoisted(() => ({
   handlers: new Map<string, (...args: any[]) => any>(),
   queries: [] as { fn: string; args: any[] | undefined }[],
   clients: [] as any[],
+  windows: [] as any[],
   respond: (_fn: string, _args?: any[]): any => undefined
 }))
 
@@ -15,7 +16,11 @@ vi.mock('electron', () => ({
     },
     removeHandler: (ch: string) => h.handlers.delete(ch)
   },
-  BrowserWindow: class {},
+  BrowserWindow: class {
+    static getAllWindows() {
+      return h.windows
+    }
+  },
   app: { isPackaged: true }
 }))
 
@@ -70,7 +75,7 @@ beforeEach(async () => {
   h.handlers.clear()
   h.queries.length = 0
   h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : { orderId: 'ORD_1_alpaca', status: 'open' })
-  setupIpcHandlers(win) // fresh rate limiter per setup
+  setupIpcHandlers() // fresh rate limiter per setup
   expect((await call('kdb:connect', cfg)).success).toBe(true)
   h.queries.length = 0
 })
@@ -207,7 +212,18 @@ describe('kdb:connect', () => {
 
 describe('setupIpcHandlers', () => {
   it('can be called again (macOS activate) without throwing', () => {
-    expect(() => setupIpcHandlers(win)).not.toThrow()
+    expect(() => setupIpcHandlers()).not.toThrow()
     expect(h.handlers.has('kdb:placeOrder')).toBe(true)
+  })
+})
+
+describe('kdb updates', () => {
+  it('are delivered to every open window, not just the one that connected', () => {
+    const popout = { isDestroyed: () => false, webContents: { send: vi.fn() } }
+    h.windows = [win, popout]
+    win.webContents.send.mockClear()
+    h.clients[h.clients.length - 2].emit('update', 'order', { orderId: 'x' })
+    expect(win.webContents.send).toHaveBeenCalledWith('kdb:update', { table: 'order', data: { orderId: 'x' } })
+    expect(popout.webContents.send).toHaveBeenCalledWith('kdb:update', { table: 'order', data: { orderId: 'x' } })
   })
 })

@@ -29,7 +29,7 @@ function createWindow(): void {
   hardenWindow(mainWindow)
 
   // Setup IPC handlers (safe to call again when the window is recreated)
-  setupIpcHandlers(mainWindow)
+  setupIpcHandlers()
 
   // Load URL based on environment
   if (isDevMode()) {
