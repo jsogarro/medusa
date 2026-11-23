@@ -23,6 +23,9 @@ pub enum ExchangeMessage {
         symbol: String,
         bids: Vec<[f64; 2]>,
         asks: Vec<[f64; 2]>,
+        /// First update id covered (Binance `U`); `None` when the venue's ids
+        /// are timestamps/counters with no per-symbol contiguity to check.
+        first_sequence: Option<u64>,
         sequence: u64,
     },
     /// Heartbeat/ping message
@@ -125,6 +128,7 @@ impl ExchangeAdapter for BitstampAdapter {
                     symbol,
                     bids,
                     asks,
+                    first_sequence: None,
                     sequence,
                 })
             }
@@ -287,6 +291,7 @@ impl ExchangeAdapter for CoinbaseAdapter {
                             symbol,
                             bids,
                             asks,
+                            first_sequence: None,
                             sequence,
                         })
                     }
@@ -348,6 +353,7 @@ impl ExchangeAdapter for CoinbaseAdapter {
                         symbol,
                         bids,
                         asks,
+                        first_sequence: None,
                         sequence,
                     })
                 }
@@ -533,6 +539,7 @@ impl ExchangeAdapter for KrakenAdapter {
                     symbol,
                     bids,
                     asks,
+                    first_sequence: None,
                     sequence,
                 }),
                 _ => Ok(ExchangeMessage::Other),
@@ -710,6 +717,7 @@ impl ExchangeAdapter for BinanceAdapter {
             symbol,
             bids: bids_parsed?,
             asks: asks_parsed?,
+            first_sequence: msg.get("U").and_then(|u| u.as_u64()),
             sequence,
         })
     }
@@ -831,6 +839,7 @@ mod tests {
                 bids,
                 asks,
                 sequence,
+                ..
             } => {
                 assert_eq!(symbol, "BTC/USD");
                 assert_eq!(bids.len(), 1);
@@ -972,6 +981,7 @@ mod tests {
                 bids,
                 asks,
                 sequence,
+                ..
             } => {
                 assert_eq!(symbol, "BTC/USD");
                 assert_eq!(bids.len(), 3);
@@ -1025,6 +1035,7 @@ mod tests {
                 bids,
                 asks,
                 sequence,
+                ..
             } => {
                 assert_eq!(symbol, "BTC-USD");
                 assert_eq!(bids.len(), 2);
@@ -1065,6 +1076,7 @@ mod tests {
                 bids,
                 asks,
                 sequence,
+                ..
             } => {
                 assert_eq!(symbol, "BTC-USD");
                 assert_eq!(bids.len(), 1);
@@ -1122,6 +1134,7 @@ mod tests {
             symbol: "BTC/USD".to_string(),
             bids: vec![[67000.0, 0.8]], // Updated quantity
             asks: vec![[67003.0, 0.5]], // New level
+            first_sequence: None,
             sequence: 101,
         };
 
@@ -1200,5 +1213,36 @@ mod tests {
             }
             _ => panic!("Expected Delta message"),
         }
+    }
+
+    #[test]
+    fn test_only_binance_deltas_carry_a_first_update_id() {
+        let binance = BinanceAdapter::new("https://api.binance.com".to_string())
+            .parse_message(r#"{"e":"depthUpdate","s":"BTCUSDT","U":98,"u":105,"b":[],"a":[]}"#)
+            .unwrap();
+        match binance {
+            ExchangeMessage::Delta {
+                first_sequence,
+                sequence,
+                ..
+            } => {
+                assert_eq!(first_sequence, Some(98));
+                assert_eq!(sequence, 105);
+            }
+            _ => panic!("Expected Delta message"),
+        }
+
+        let bitstamp = BitstampAdapter::new("https://www.bitstamp.net/api/v2".to_string())
+            .parse_message(
+                r#"{"event":"data","channel":"diff_order_book_btcusd","data":{"microtimestamp":"1700000000000000","bids":[],"asks":[]}}"#,
+            )
+            .unwrap();
+        assert!(matches!(
+            bitstamp,
+            ExchangeMessage::Delta {
+                first_sequence: None,
+                ..
+            }
+        ));
     }
 }

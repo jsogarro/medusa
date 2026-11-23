@@ -115,6 +115,7 @@ impl ExchangeSubscriber {
                             symbol,
                             bids,
                             asks,
+                            first_sequence,
                             sequence,
                         }) => {
                             debug!(
@@ -127,7 +128,9 @@ impl ExchangeSubscriber {
                             );
 
                             // Apply delta with sequence validation
-                            if let Err(e) = state.apply_delta(&symbol, bids, asks, sequence) {
+                            if let Err(e) =
+                                state.apply_update(&symbol, bids, asks, first_sequence, sequence)
+                            {
                                 warn!("{} sequence gap for {}: {}", self.config.name, symbol, e);
                                 // Rebootstrap this symbol
                                 self.rebootstrap_symbol(adapter.as_ref(), &mut state, &symbol)
