@@ -77,15 +77,21 @@ class ResilientKdbConnection:
             logger.info("Disconnected from kdb+")
 
     def query(self, expr: str) -> Any:
-        """Execute query; reconnect and retry only if the connection was lost.
+        """Execute query; reconnect and retry if the connection was lost.
 
         q evaluation errors propagate: re-running ``expr`` could repeat side effects.
+        Any other failure (pykx raises a bare RuntimeError for a closed IPC link) is
+        treated as a lost connection.
         """
+        import pykx as kx
+
         if self._conn is None:
             self.connect()
         try:
             return self._conn(expr)
-        except (OSError, EOFError):
+        except kx.QError:
+            raise
+        except Exception:
             logger.warning("kdb+ connection lost, reconnecting...")
             self._conn = None
             self.connect()

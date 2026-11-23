@@ -21,6 +21,7 @@ class QError(Exception):
 def _fake_pykx(monkeypatch, *connections):
     fake = types.ModuleType("pykx")
     fake.QConnection = MagicMock(side_effect=list(connections))
+    fake.QError = QError
     monkeypatch.setitem(sys.modules, "pykx", fake)
     return fake
 
@@ -50,6 +51,26 @@ def test_lost_connection_reconnects_and_reruns(monkeypatch):
     fake = _fake_pykx(monkeypatch, dead, live)
     assert ResilientKdbConnection().query("x") == 42
     assert fake.QConnection.call_count == 2
+
+
+def test_closed_ipc_connection_reconnects(monkeypatch):
+    # pykx raises a bare RuntimeError (not OSError) when q has died
+    dead = MagicMock(side_effect=RuntimeError("Attempted to use a closed IPC connection"))
+    live = MagicMock(return_value=7)
+    fake = _fake_pykx(monkeypatch, dead, live)
+    rc = ResilientKdbConnection()
+    assert rc.query("x") == 7
+    assert fake.QConnection.call_count == 2
+    assert rc._conn is live
+
+
+def test_q_error_keeps_the_connection(monkeypatch):
+    conn = MagicMock(side_effect=QError("type"))
+    _fake_pykx(monkeypatch, conn)
+    rc = ResilientKdbConnection()
+    with pytest.raises(QError):
+        rc.query("1+`a")
+    assert rc._conn is conn
 
 
 def test_equity_loader_shares_the_one_connection_class():
