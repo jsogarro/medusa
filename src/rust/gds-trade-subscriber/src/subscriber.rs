@@ -4,7 +4,7 @@
 //! reconnection with exponential backoff, deduplicates trades, and publishes
 //! to the Tickerplant.
 
-use crate::deduplicator::TradeDeduplicator;
+use crate::deduplicator::{trade_key, TradeDeduplicator};
 use crate::exchange_adapter::{
     BitstampTradeAdapter, CoinbaseTradeAdapter, KrakenTradeAdapter, NormalizedTrade, TradeAdapter,
 };
@@ -196,14 +196,24 @@ impl TradeSubscriber {
         }
     }
 
+    #[cfg(test)]
+    fn is_seen(&self, symbol: &str, id: &str) -> bool {
+        self.deduplicator
+            .is_duplicate(&trade_key(&self.config.name, symbol, id))
+    }
+
     /// Queue new trades and publish everything unconfirmed. A trade is recorded as
     /// seen only once the Tickerplant has confirmed the batch; otherwise it stays
     /// queued and goes out again with the next batch.
     async fn publish_confirmed(&mut self, trades: Vec<NormalizedTrade>) {
         for normalized_trade in trades {
             let trade = normalized_trade.into_trade();
-            if self.deduplicator.is_duplicate(&trade.id)
-                || self.pending.iter().any(|p| p.id == trade.id)
+            let key = trade_key(&trade.exchange, &trade.pair, &trade.id);
+            if self.deduplicator.is_duplicate(&key)
+                || self
+                    .pending
+                    .iter()
+                    .any(|p| trade_key(&p.exchange, &p.pair, &p.id) == key)
             {
                 debug!("[{}] Duplicate trade: {}", self.exchange_name(), trade.id);
                 continue;
@@ -216,7 +226,8 @@ impl TradeSubscriber {
         match self.publisher.publish_trades_confirmed(&self.pending).await {
             Ok(()) => {
                 for trade in self.pending.drain(..) {
-                    self.deduplicator.record(&trade.id);
+                    self.deduplicator
+                        .record(&trade_key(&trade.exchange, &trade.pair, &trade.id));
                 }
             }
             Err(e) => {
@@ -301,7 +312,7 @@ mod tests {
         let mut sub = subscriber(1);
         sub.process_message(BITSTAMP_TRADE).await;
         assert!(
-            !sub.deduplicator.is_duplicate("123456"),
+            !sub.is_seen("BTCUSD", "123456"),
             "a trade that was not published must stay eligible for redelivery"
         );
     }
@@ -354,7 +365,7 @@ mod tests {
         let (port, _asyncs) = serving_tp(0).await;
         let mut sub = subscriber(port);
         sub.process_message(BITSTAMP_TRADE).await;
-        assert!(sub.deduplicator.is_duplicate("123456"));
+        assert!(sub.is_seen("BTCUSD", "123456"));
     }
 
     #[tokio::test]
@@ -384,7 +395,7 @@ mod tests {
 
         sub.process_message(BITSTAMP_TRADE).await;
         assert!(
-            !sub.deduplicator.is_duplicate("123456"),
+            !sub.is_seen("BTCUSD", "123456"),
             "a trade the tickerplant never confirmed must not be recorded as seen"
         );
 
@@ -393,8 +404,8 @@ mod tests {
         let next = BITSTAMP_TRADE.replace("123456", "123457");
         sub.process_message(&next).await;
         assert_eq!(asyncs.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert!(sub.deduplicator.is_duplicate("123456"));
-        assert!(sub.deduplicator.is_duplicate("123457"));
+        assert!(sub.is_seen("BTCUSD", "123456"));
+        assert!(sub.is_seen("BTCUSD", "123457"));
     }
 
     #[tokio::test]
@@ -432,5 +443,17 @@ mod tests {
             matches!(second, Ok(Some(()))),
             "a feed that goes silent must be treated as a lost connection"
         );
+    }
+
+    #[tokio::test]
+    async fn same_trade_id_on_different_symbols_is_not_a_duplicate() {
+        let (port, asyncs) = serving_tp(0).await;
+        let mut sub = subscriber(port);
+        sub.process_message(BITSTAMP_TRADE).await;
+        sub.process_message(&BITSTAMP_TRADE.replace("btcusd", "ethusd"))
+            .await;
+        assert_eq!(asyncs.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(sub.is_seen("BTCUSD", "123456"));
+        assert!(sub.is_seen("ETHUSD", "123456"));
     }
 }

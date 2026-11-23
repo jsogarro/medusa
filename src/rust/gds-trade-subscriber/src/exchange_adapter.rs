@@ -728,12 +728,13 @@ impl TradeAdapter for KrakenTradeAdapter {
                 .context("Failed to parse RFC3339 timestamp")?
                 .with_timezone(&chrono::Utc);
 
-            // Use trade_id if available, otherwise construct from timestamp
-            let trade_id = if let Some(id) = trade_data.get("trade_id").and_then(|i| i.as_u64()) {
-                id.to_string()
-            } else {
-                format!("{}_{}", symbol, dt.timestamp_millis())
+            // Kraken documents `trade_id` on every trade; a timestamp-derived id would
+            // collide for same-millisecond trades, so a trade without one is skipped.
+            let Some(trade_id) = trade_data.get("trade_id").and_then(|i| i.as_u64()) else {
+                warn!("Skipping Kraken trade without trade_id for {}", symbol);
+                continue;
             };
+            let trade_id = trade_id.to_string();
 
             normalized_trades.push(NormalizedTrade {
                 exchange: "kraken".to_string(),
@@ -830,10 +831,10 @@ fn parse_kraken_rest_trade(
         .filter(|t| t.is_finite() && *t > 0.0)
         .ok_or_else(|| anyhow!("Invalid time: {}", trade_arr[2]))?;
 
-    let side = if trade_arr[3].as_str() == Some("b") {
-        Side::Buy
-    } else {
-        Side::Sell
+    let side = match trade_arr[3].as_str() {
+        Some("b") => Side::Buy,
+        Some("s") => Side::Sell,
+        _ => return Err(anyhow!("Unknown side: {}", trade_arr[3])),
     };
 
     let timestamp_secs = time_f64.trunc() as i64;
@@ -1032,5 +1033,41 @@ mod tests {
         // Venue id wins, matching the id the WebSocket feed uses.
         let c = parse_kraken_rest_trade("XBT/USD", 0, &same_instant(Some(42))).unwrap();
         assert_eq!(c.trade_id, "42");
+    }
+
+    #[test]
+    fn test_kraken_rest_unknown_side_is_rejected() {
+        let row = |side: serde_json::Value| {
+            vec![
+                serde_json::json!("100.0"),
+                serde_json::json!("1.0"),
+                serde_json::json!(1640000000.5),
+                side,
+                serde_json::json!("l"),
+                serde_json::json!(""),
+            ]
+        };
+        assert!(parse_kraken_rest_trade("XBT/USD", 0, &row(serde_json::json!("x"))).is_err());
+        assert!(parse_kraken_rest_trade("XBT/USD", 0, &row(serde_json::json!(null))).is_err());
+        let sell = parse_kraken_rest_trade("XBT/USD", 0, &row(serde_json::json!("s"))).unwrap();
+        assert_eq!(sell.side, Side::Sell);
+    }
+
+    #[test]
+    fn test_kraken_ws_trade_without_trade_id_is_skipped() {
+        let adapter = KrakenTradeAdapter::new("http://test".to_string());
+        let json = |ids: [&str; 2]| {
+            format!(
+                r#"{{"channel":"trade","type":"update","data":[
+                {{"symbol":"BTC/USD","side":"buy","price":100.0,"qty":1.0,"ord_type":"limit",{}"timestamp":"2024-01-01T00:00:00.123456Z"}},
+                {{"symbol":"BTC/USD","side":"sell","price":100.0,"qty":1.0,"ord_type":"limit",{}"timestamp":"2024-01-01T00:00:00.123789Z"}}]}}"#,
+                ids[0], ids[1]
+            )
+        };
+        let trades = adapter
+            .parse_message(&json([r#""trade_id":7,"#, ""]))
+            .unwrap();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].trade_id, "7");
     }
 }
