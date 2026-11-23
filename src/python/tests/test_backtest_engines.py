@@ -246,7 +246,6 @@ class TestOptunaOptimizer:
 
     def test_optimizer_init(self, engine):
         """Test Optuna optimizer initialization."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(engine, n_trials=10)
@@ -255,7 +254,6 @@ class TestOptunaOptimizer:
 
     def test_optimizer_tpe_sampler(self, engine):
         """Test TPE sampler initialization."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(engine, sampler="tpe")
@@ -265,7 +263,6 @@ class TestOptunaOptimizer:
 
     def test_optimizer_cmaes_sampler(self, engine):
         """Test CMA-ES sampler initialization."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(engine, sampler="cmaes")
@@ -275,7 +272,6 @@ class TestOptunaOptimizer:
 
     def test_optimizer_invalid_sampler(self, engine):
         """Test invalid sampler raises error."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         with pytest.raises(ValueError, match="Unknown sampler"):
@@ -283,7 +279,6 @@ class TestOptunaOptimizer:
 
     def test_optimize_strategy_basic(self, engine, sample_price):
         """Test basic strategy optimization."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(engine, n_trials=5, study_name="test_study")
@@ -313,7 +308,6 @@ class TestOptunaOptimizer:
 
     def test_optimize_strategy_returns_best_params(self, engine, sample_price):
         """Test that optimizer returns valid best params."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(engine, n_trials=3)

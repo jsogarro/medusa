@@ -73,7 +73,6 @@ def test_max_drawdown_metric_is_higher_is_better(dd):
 
 
 def test_optimizer_default_storage_is_in_memory():
-    pytest.importorskip("optuna")
     from medusa.backtest.optimizer import OptunaOptimizer
 
     assert OptunaOptimizer(types.SimpleNamespace()).storage is None

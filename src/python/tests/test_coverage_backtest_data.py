@@ -62,7 +62,6 @@ class TestOptunaOptimizer:
 
     def test_optimizer_init_invalid_sampler(self, mock_engine: MagicMock) -> None:
         """Test optimizer raises error for invalid sampler."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         with pytest.raises(ValueError, match="Unknown sampler"):
@@ -70,7 +69,6 @@ class TestOptunaOptimizer:
 
     def test_optimizer_init_invalid_pruner(self, mock_engine: MagicMock) -> None:
         """Test optimizer raises error for invalid pruner."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         with pytest.raises(ValueError, match="Unknown pruner"):
@@ -78,7 +76,6 @@ class TestOptunaOptimizer:
 
     def test_optimize_strategy_basic(self, mock_engine: MagicMock, sample_price: pd.Series) -> None:
         """Test basic strategy optimization."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(mock_engine, n_trials=5, sampler="tpe", study_name="test_basic")
@@ -107,7 +104,6 @@ class TestOptunaOptimizer:
         self, mock_engine: MagicMock, sample_price: pd.Series
     ) -> None:
         """Test optimization with float parameters."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(mock_engine, n_trials=3, study_name="test_float")
@@ -131,7 +127,6 @@ class TestOptunaOptimizer:
         self, mock_engine: MagicMock, sample_price: pd.Series
     ) -> None:
         """Test optimization with categorical parameters."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(mock_engine, n_trials=3, study_name="test_categorical")
@@ -158,7 +153,6 @@ class TestOptunaOptimizer:
         self, mock_engine: MagicMock, sample_price: pd.Series
     ) -> None:
         """Test optimization raises error for unknown parameter type."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(mock_engine, n_trials=1, study_name="test_unknown")
@@ -177,7 +171,6 @@ class TestOptunaOptimizer:
         self, mock_engine: MagicMock, sample_price: pd.Series
     ) -> None:
         """Test optimization with invalid metric raises error when all trials pruned."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(mock_engine, n_trials=1, study_name="test_invalid_unique")
@@ -196,7 +189,6 @@ class TestOptunaOptimizer:
 
     def test_optimize_strategy_nan_handling(self, sample_price: pd.Series) -> None:
         """Test optimization handles NaN/inf metric values via pruning."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         mock_engine = MagicMock()
@@ -217,7 +209,6 @@ class TestOptunaOptimizer:
 
     def test_get_trials_dataframe_no_study(self, mock_engine: MagicMock) -> None:
         """Test get_trials_dataframe raises error when no study exists."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(mock_engine)
@@ -227,7 +218,6 @@ class TestOptunaOptimizer:
 
     def test_plot_optimization_history_no_study(self, mock_engine: MagicMock) -> None:
         """Test plot_optimization_history raises error when no study exists."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(mock_engine)
@@ -237,7 +227,6 @@ class TestOptunaOptimizer:
 
     def test_plot_param_importances_no_study(self, mock_engine: MagicMock) -> None:
         """Test plot_param_importances raises error when no study exists."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(mock_engine)
@@ -247,7 +236,6 @@ class TestOptunaOptimizer:
 
     def test_plot_parallel_coordinate_no_study(self, mock_engine: MagicMock) -> None:
         """Test plot_parallel_coordinate raises error when no study exists."""
-        pytest.importorskip("optuna")
         from medusa.backtest.optimizer import OptunaOptimizer
 
         optimizer = OptunaOptimizer(mock_engine)
