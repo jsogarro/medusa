@@ -494,4 +494,111 @@ mod tests {
             .await
             .is_err());
     }
+
+    fn book(bid: (f64, f64), ask: (f64, f64)) -> OrderBook {
+        OrderBook {
+            pair: "BTC-USD".to_string(),
+            exchange: "kraken".to_string(),
+            bids: vec![PriceLevel {
+                price: bid.0,
+                quantity: bid.1,
+            }],
+            asks: vec![PriceLevel {
+                price: ask.0,
+                quantity: ask.1,
+            }],
+            timestamp: Utc::now(),
+            sequence: Some(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_rejects_non_finite_mid() {
+        // Each price is finite; only their midpoint overflows to infinity.
+        let (port, _asyncs) = serving_tp(0).await;
+        let mut p = KdbPublisher::connect("127.0.0.1", port, "", "")
+            .await
+            .unwrap();
+        let ob = book((f64::MAX, 1.0), (f64::MAX, 1.0));
+        assert!(p.publish_orderbook(&ob).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn publish_rejects_non_finite_level_quantity() {
+        let (port, _asyncs) = serving_tp(0).await;
+        let mut p = KdbPublisher::connect("127.0.0.1", port, "", "")
+            .await
+            .unwrap();
+        let ob = book((100.0, f64::NAN), (101.0, 1.0));
+        assert!(p.publish_orderbook(&ob).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_send_drops_the_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+            }
+            sock.write_all(&[3]).await.unwrap();
+        });
+        let mut p = KdbPublisher::connect("127.0.0.1", port, "", "")
+            .await
+            .unwrap();
+        // The peer is gone: writes fail once the reset has arrived.
+        let mut failed = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if p.publish_trade(&sample_trade("1", 100.0)).await.is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "publishing to a dead peer must eventually fail");
+        assert!(
+            p.client.is_none(),
+            "a failed send must drop the connection so the next publish re-dials"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_reconnect_resets_the_backoff() {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let mut p = KdbPublisher::lazy("127.0.0.1", port, "", "");
+        for _ in 0..3 {
+            assert!(p.publish_trade(&sample_trade("1", 100.0)).await.is_err());
+            p.retry_at = None;
+        }
+        assert!(p.backoff.peek() > Duration::from_secs(1));
+
+        let (_asyncs_port, _asyncs) = serving_tp(port).await;
+        p.publish_trade(&sample_trade("1", 100.0)).await.unwrap();
+        assert_eq!(p.backoff.peek(), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn reconnect_waits_for_the_retry_deadline() {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let mut p = KdbPublisher::lazy("127.0.0.1", port, "", "");
+        assert!(p.publish_trade(&sample_trade("1", 100.0)).await.is_err());
+
+        // The tickerplant is back, but the backoff deadline has not passed yet.
+        let (_p, _asyncs) = serving_tp(port).await;
+        assert!(
+            p.publish_trade(&sample_trade("1", 100.0)).await.is_err(),
+            "must not re-dial before retry_at"
+        );
+        assert!(p.client.is_none());
+    }
 }

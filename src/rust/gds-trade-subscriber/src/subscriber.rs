@@ -456,4 +456,58 @@ mod tests {
         assert!(sub.is_seen("BTCUSD", "123456"));
         assert!(sub.is_seen("ETHUSD", "123456"));
     }
+
+    /// Adapter whose REST backfill returns one fixed trade.
+    struct BackfillAdapter;
+
+    #[async_trait::async_trait]
+    impl TradeAdapter for BackfillAdapter {
+        fn exchange_name(&self) -> &str {
+            "bitstamp"
+        }
+        fn build_subscribe_message(&self, _symbols: &[String]) -> String {
+            String::new()
+        }
+        fn parse_message(&self, _text: &str) -> Result<Vec<NormalizedTrade>> {
+            Ok(vec![])
+        }
+        async fn fetch_recent_trades(
+            &self,
+            symbol: &str,
+            _limit: usize,
+        ) -> Result<Vec<NormalizedTrade>> {
+            Ok(vec![NormalizedTrade {
+                exchange: "bitstamp".to_string(),
+                symbol: symbol.to_string(),
+                trade_id: "900".to_string(),
+                price: 100.0,
+                quantity: 1.0,
+                side: exchange_connector::types::Side::Buy,
+                timestamp: chrono::Utc::now(),
+            }])
+        }
+    }
+
+    fn backfilling_subscriber(tp_port: u16) -> TradeSubscriber {
+        let mut sub = subscriber(tp_port);
+        sub.config.symbols = vec!["BTCUSD".to_string()];
+        sub.adapter = Arc::new(BackfillAdapter);
+        sub
+    }
+
+    #[tokio::test]
+    async fn backfilled_trade_is_not_seen_when_the_publish_fails() {
+        let mut sub = backfilling_subscriber(1);
+        sub.backfill_trades().await.unwrap();
+        assert!(!sub.is_seen("BTCUSD", "900"));
+    }
+
+    #[tokio::test]
+    async fn backfilled_trade_is_seen_once_published() {
+        let (port, asyncs) = serving_tp(0).await;
+        let mut sub = backfilling_subscriber(port);
+        sub.backfill_trades().await.unwrap();
+        assert_eq!(asyncs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(sub.is_seen("BTCUSD", "900"));
+    }
 }
