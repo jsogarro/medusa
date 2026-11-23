@@ -3,6 +3,7 @@
 //! WebSocket documentation: https://binance-docs.github.io/apidocs/spot/en/#websocket-market-streams
 
 use crate::client::ExchangeError;
+use crate::feeds::check_trade;
 use crate::types::{OrderBook, PriceLevel, Side, Trade};
 use crate::websocket::{ReconnectConfig, WebSocketClient, WsConfig, WsMessage};
 use chrono::{DateTime, Utc};
@@ -122,7 +123,7 @@ impl BinanceFeed {
             .parse()
             .map_err(|_| ExchangeError::Other(format!("Invalid quantity: {}", msg.q)))?;
 
-        Ok(Trade {
+        check_trade(Trade {
             id: msg.t.to_string(),
             pair,
             exchange: "binance".to_string(),
@@ -415,5 +416,19 @@ mod tests {
         let combined = symbols.join("/");
 
         assert_eq!(combined, "btcusdt@trade/ethusdt@trade/solusdt@trade");
+    }
+
+    #[test]
+    fn parse_trade_rejects_non_positive_price_or_quantity() {
+        let msg = |p: &str, q: &str| {
+            format!(
+                r#"{{"e":"trade","E":1,"s":"BTCUSDT","t":1,"p":"{p}","q":"{q}","T":1640000000000,"m":false}}"#
+            )
+        };
+        assert!(BinanceFeed::parse_trade(&msg("50000", "0.1")).is_ok());
+        assert!(BinanceFeed::parse_trade(&msg("0", "0.1")).is_err());
+        assert!(BinanceFeed::parse_trade(&msg("50000", "0")).is_err());
+        assert!(BinanceFeed::parse_trade(&msg("NaN", "0.1")).is_err());
+        assert!(BinanceFeed::parse_trade(&msg("50000", "-1")).is_err());
     }
 }

@@ -2,7 +2,8 @@
 //!
 //! WebSocket documentation: https://docs.kraken.com/websockets/
 
-use crate::client::ExchangeError;
+use crate::client::{parse_side, ExchangeError};
+use crate::feeds::check_trade;
 use crate::types::{OrderBook, PriceLevel, Side, Trade};
 use crate::websocket::{ReconnectConfig, WebSocketClient, WsConfig, WsMessage};
 use chrono::Utc;
@@ -195,11 +196,7 @@ impl KrakenFeed {
             .as_str()
             .ok_or_else(|| ExchangeError::Other("Invalid side".into()))?;
 
-        let side = if side_str == "buy" {
-            Side::Buy
-        } else {
-            Side::Sell
-        };
+        let side = parse_side(side_str)?;
 
         // v2 uses RFC3339 timestamp strings
         let timestamp_str = trade_data["timestamp"]
@@ -210,14 +207,14 @@ impl KrakenFeed {
             .map_err(|e| ExchangeError::Other(format!("Failed to parse timestamp: {}", e)))?
             .with_timezone(&Utc);
 
-        // Use trade_id if available, otherwise construct from timestamp
-        let trade_id = if let Some(id) = trade_data["trade_id"].as_u64() {
-            id.to_string()
-        } else {
-            format!("{}_{}", symbol, timestamp.timestamp_millis())
-        };
+        // A timestamp-derived id would collide for same-instant trades and the
+        // deduplicator would drop one, so the venue's own id is required.
+        let trade_id = trade_data["trade_id"]
+            .as_u64()
+            .ok_or_else(|| ExchangeError::Other("Missing trade_id".into()))?
+            .to_string();
 
-        Ok(Trade {
+        check_trade(Trade {
             id: trade_id,
             pair: symbol.to_string(),
             exchange: "kraken".to_string(),
@@ -280,6 +277,7 @@ mod tests {
                 "price": 50000.0,
                 "qty": 0.1,
                 "side": "buy",
+                "trade_id": 4242,
                 "timestamp": "2024-04-25T12:00:00.000Z"
             }]
         }"#;
@@ -290,5 +288,24 @@ mod tests {
         assert_eq!(trade.price, 50000.0);
         assert_eq!(trade.quantity, 0.1);
         assert_eq!(trade.side, Side::Buy);
+    }
+
+    fn kraken_trade(extra: &str, price: &str, side: &str) -> String {
+        format!(
+            r#"{{"channel":"trade","type":"update","data":[{{"symbol":"BTC/USD","price":{price},"qty":0.1,"side":"{side}","timestamp":"2024-04-25T12:00:00.000Z"{extra}}}]}}"#
+        )
+    }
+
+    #[test]
+    fn parse_trade_requires_venue_id_and_valid_fields() {
+        assert!(
+            KrakenFeed::parse_trade(&kraken_trade(r#","trade_id":7"#, "50000.0", "sell")).is_ok()
+        );
+        // No venue id: a timestamp-derived id would collide for same-instant trades.
+        assert!(KrakenFeed::parse_trade(&kraken_trade("", "50000.0", "buy")).is_err());
+        let id = r#","trade_id":7"#;
+        assert!(KrakenFeed::parse_trade(&kraken_trade(id, "50000.0", "short")).is_err());
+        assert!(KrakenFeed::parse_trade(&kraken_trade(id, "0.0", "buy")).is_err());
+        assert!(KrakenFeed::parse_trade(&kraken_trade(id, "-1.0", "buy")).is_err());
     }
 }
