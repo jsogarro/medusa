@@ -58,6 +58,21 @@ describe('validateOrder', () => {
     expect(validateOrder({ ...base, price: 123456789.123457 }).price).toBe(123456789123457)
   })
 
+  it.each([87775427.6265391, 123456789.0000004, 10000000.0000005, 999999999.9999995])(
+    'rejects a 7th decimal digit at any magnitude: %s',
+    (v) => {
+      expect(() => validateOrder({ ...base, quantity: v })).toThrow(/6 decimal/)
+    }
+  )
+
+  it.each([0.1, 0.3, 1.1, 64999.99, 0.000001, 123456.789012, 999999999.999999, 2.675, 0.1 + 0.2])(
+    'accepts the exact 6 dp value %s',
+    (v) => {
+      const q = validateOrder({ ...base, quantity: v }).quantity
+      expect(q).toBe(Math.round(v * 1e6))
+    }
+  )
+
   it('rejects out-of-bounds values', () => {
     expect(() => validateOrder({ ...base, quantity: 1e12 })).toThrow(/quantity/)
     expect(() => validateOrder({ ...base, price: 1e12 })).toThrow(/price/)
