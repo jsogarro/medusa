@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow, IpcMainInvokeEvent } from 'electron'
-import { KdbClient } from './kdb-client'
+import { KdbClient, SAFE_TABLE } from './kdb-client'
 import { IpcRateLimiter } from './ipc-rate-limiter'
 import { isTrustedSender } from './security'
 import { fixedLong, sym } from './q-types'
@@ -28,7 +28,6 @@ function createRateLimiter(): IpcRateLimiter {
   })
 }
 
-const SAFE_TABLE = /^[a-z][a-zA-Z0-9_.]*$/
 const MAX_PAYLOAD_SIZE = 10 * 1024  // 10KB max payload (JSON stringified)
 
 function validatePayloadSize(obj: unknown): void {

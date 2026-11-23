@@ -1,6 +1,9 @@
 import { EventEmitter } from 'events'
 import * as q from 'node-q'
 
+/** Table names are spliced into q text, so only plain lowercase-initial identifiers are accepted. */
+export const SAFE_TABLE = /^[a-z][a-zA-Z0-9_.]*$/
+
 export interface KdbConfig {
   host: string
   port: number
@@ -113,6 +116,9 @@ export class KdbClient extends EventEmitter {
   }
 
   async subscribe(table: string): Promise<void> {
+    if (typeof table !== 'string' || !SAFE_TABLE.test(table)) {
+      throw new Error(`Invalid table name: "${table}"`)
+    }
     await this.sendSubscribe(table)
     this.subscriptions.add(table)
   }

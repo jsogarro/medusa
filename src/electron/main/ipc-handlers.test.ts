@@ -4,6 +4,7 @@ const h = vi.hoisted(() => ({
   handlers: new Map<string, (...args: any[]) => any>(),
   queries: [] as { fn: string; args: any[] | undefined }[],
   clients: [] as any[],
+  subscribed: [] as string[],
   windows: [] as any[],
   respond: (_fn: string, _args?: any[]): any => undefined
 }))
@@ -43,13 +44,15 @@ vi.mock('./kdb-client', async () => {
     isConnected() {
       return this.connected
     }
-    async subscribe() {}
+    async subscribe(table: string) {
+      h.subscribed.push(table)
+    }
     async query(fn: string, args?: any[]) {
       h.queries.push({ fn, args })
       return h.respond(fn, args)
     }
   }
-  return { KdbClient: FakeKdbClient }
+  return { KdbClient: FakeKdbClient, SAFE_TABLE: /^[a-z][a-zA-Z0-9_.]*$/ }
 })
 
 import { setupIpcHandlers } from './ipc-handlers'
@@ -74,6 +77,7 @@ const typed = (a: any) => ({ type: a.type(), value: a.value() })
 beforeEach(async () => {
   h.handlers.clear()
   h.queries.length = 0
+  h.subscribed.length = 0
   h.respond = (fn) => (fn === '.risk.validateOrder' ? [true, null] : { orderId: 'ORD_1_alpaca', status: 'open' })
   setupIpcHandlers() // fresh rate limiter per setup
   expect((await call('kdb:connect', cfg)).success).toBe(true)
@@ -163,6 +167,18 @@ describe('kdb:cancelOrder', () => {
     expect((await call('kdb:cancelOrder', 'a;b', 'alpaca')).success).toBe(false)
     expect((await call('kdb:cancelOrder', 'ORD_1', 'a b')).success).toBe(false)
     expect(h.queries).toHaveLength(0)
+  })
+})
+
+describe('kdb:subscribe', () => {
+  it('subscribes to a valid table', async () => {
+    expect((await call('kdb:subscribe', 'order')).success).toBe(true)
+    expect(h.subscribed).toEqual(['order'])
+  })
+
+  it.each(['order;1', 'a b', '`x', 'Order', '', 42, null])('rejects table %j before reaching the client', async (table) => {
+    expect((await call('kdb:subscribe', table)).success).toBe(false)
+    expect(h.subscribed).toEqual([])
   })
 })
 

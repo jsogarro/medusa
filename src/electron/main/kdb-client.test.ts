@@ -122,6 +122,17 @@ describe('KdbClient', () => {
     await client.disconnect()
   })
 
+  it.each(['order;1', 'a b', '`x', 'Order', '', '1abc', 'a\nb', 'order\n'])(
+    'refuses to splice table name %j into q text',
+    async (table) => {
+      const client = new KdbClient({ host: 'localhost', port: 1 })
+      await client.connect()
+      await expect(client.subscribe(table)).rejects.toThrow(/Invalid table name/)
+      expect(h.conns[0].ksCalls).toHaveLength(0)
+      await client.disconnect()
+    }
+  )
+
   it('forwards upd events', async () => {
     const client = new KdbClient({ host: 'localhost', port: 1 })
     const seen: unknown[] = []
