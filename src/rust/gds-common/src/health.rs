@@ -58,6 +58,11 @@ impl HealthMonitor {
         self.timeout
     }
 
+    /// Time left before the connection counts as stale (zero once it is).
+    pub fn remaining(&self) -> Duration {
+        self.timeout.saturating_sub(self.last_message.elapsed())
+    }
+
     /// Returns elapsed time since the last message.
     pub fn elapsed(&self) -> Duration {
         self.last_message.elapsed()
@@ -99,6 +104,16 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(monitor.is_stale());
+    }
+
+    #[tokio::test]
+    async fn test_remaining_counts_down_to_zero() {
+        let mut monitor = HealthMonitor::new(Duration::from_millis(50));
+        monitor.mark_healthy();
+        assert!(monitor.remaining() <= Duration::from_millis(50));
+        assert!(monitor.remaining() > Duration::ZERO);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(monitor.remaining(), Duration::ZERO);
     }
 
     #[tokio::test]

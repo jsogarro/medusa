@@ -89,11 +89,20 @@ impl ExchangeSubscriber {
         health.mark_healthy();
 
         // Message processing loop
-        while let Some(msg_result) = read.next().await {
+        loop {
+            // Bound the wait by the health deadline: a feed that goes silent
+            // never yields a message to check staleness against.
+            let Ok(next) = tokio::time::timeout(health.remaining(), read.next()).await else {
+                warn!(
+                    "{} connection stale (no messages in {:?})",
+                    self.config.name, self.health_timeout
+                );
+                break;
+            };
+            let Some(msg_result) = next else { break };
+            health.reset_timer();
             match msg_result {
                 Ok(Message::Text(text)) => {
-                    health.reset_timer();
-
                     match adapter.parse_message(&text) {
                         Ok(ExchangeMessage::Snapshot {
                             symbol,
@@ -171,15 +180,6 @@ impl ExchangeSubscriber {
                     error!("{} WebSocket error: {}", self.config.name, e);
                     break;
                 }
-            }
-
-            // Health check
-            if health.is_stale() {
-                warn!(
-                    "{} connection stale (no messages in {:?})",
-                    self.config.name, self.health_timeout
-                );
-                break;
             }
         }
 
@@ -299,6 +299,42 @@ mod tests {
         assert!(
             matches!(second, Ok(Some(()))),
             "subscriber must reconnect after a Close frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnects_when_server_goes_silent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // Scripted exchange: complete the handshake, then never send a frame.
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                if let Ok(ws) = tokio_tungstenite::accept_async(sock).await {
+                    held.push(ws);
+                    let _ = tx.send(());
+                }
+            }
+        });
+
+        let config = ExchangeConfig {
+            name: "bitstamp".to_string(),
+            ws_url: format!("ws://127.0.0.1:{}", port),
+            rest_url: "http://127.0.0.1:1".to_string(),
+            symbols: vec![],
+            enabled: true,
+        };
+        let publisher = KdbPublisher::lazy("127.0.0.1", 1, "", "");
+        let mut sub = ExchangeSubscriber::new(config, publisher, Duration::from_millis(200));
+        let run = tokio::spawn(async move { sub.run().await });
+
+        rx.recv().await.expect("first connection");
+        let second = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        run.abort();
+        assert!(
+            matches!(second, Ok(Some(()))),
+            "a feed that goes silent must be treated as a lost connection"
         );
     }
 }

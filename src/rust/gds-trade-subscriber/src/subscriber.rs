@@ -141,16 +141,18 @@ impl TradeSubscriber {
         }
 
         // Process messages
-        while let Some(msg_result) = read.next().await {
-            // Check health
-            if self.health_monitor.is_stale() {
+        loop {
+            // Bound the wait by the health deadline: a feed that goes silent
+            // never yields a message to check staleness against.
+            let Ok(next) = time::timeout(self.health_monitor.remaining(), read.next()).await else {
                 warn!(
                     "[{}] Connection stale (no data for {:?}), reconnecting",
                     self.exchange_name(),
                     self.health_monitor.timeout()
                 );
                 return Err(anyhow::anyhow!("Connection stale"));
-            }
+            };
+            let Some(msg_result) = next else { break };
 
             match msg_result {
                 Ok(Message::Text(text)) => {
@@ -322,5 +324,42 @@ mod tests {
         sub.process_message(BITSTAMP_TRADE).await;
         tp.await.unwrap();
         assert!(sub.deduplicator.is_duplicate("123456"));
+    }
+
+    #[tokio::test]
+    async fn reconnects_when_server_goes_silent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // Scripted exchange: complete the handshake, then never send a frame.
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                if let Ok(ws) = tokio_tungstenite::accept_async(sock).await {
+                    held.push(ws);
+                    let _ = tx.send(());
+                }
+            }
+        });
+
+        let config = ExchangeConfig {
+            name: "bitstamp".to_string(),
+            ws_url: format!("ws://127.0.0.1:{}", port),
+            rest_url: "http://127.0.0.1:1".to_string(),
+            symbols: vec![],
+            enabled: true,
+        };
+        let publisher = KdbPublisher::lazy("127.0.0.1", 1, "", "");
+        let mut sub =
+            TradeSubscriber::new(config, publisher, Duration::from_millis(200), false).unwrap();
+        let run = tokio::spawn(async move { sub.run().await });
+
+        rx.recv().await.expect("first connection");
+        let second = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        run.abort();
+        assert!(
+            matches!(second, Ok(Some(()))),
+            "a feed that goes silent must be treated as a lost connection"
+        );
     }
 }
