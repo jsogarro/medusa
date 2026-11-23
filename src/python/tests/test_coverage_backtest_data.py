@@ -189,7 +189,7 @@ class TestOptunaOptimizer:
 
         # Invalid metric gets caught in objective function
         # When all trials are pruned, best_params raises ValueError
-        with pytest.raises(ValueError, match="Record does not exist"):
+        with pytest.raises(ValueError, match="No trials are completed yet"):
             optimizer.optimize_strategy(
                 sample_price, signal_func, param_space, metric="invalid_metric"
             )
@@ -212,7 +212,7 @@ class TestOptunaOptimizer:
         param_space = {"fast": {"type": "int", "low": 5, "high": 20}}
 
         # All trials will be pruned due to NaN, raising ValueError
-        with pytest.raises(ValueError, match="Record does not exist"):
+        with pytest.raises(ValueError, match="No trials are completed yet"):
             optimizer.optimize_strategy(sample_price, signal_func, param_space)
 
     def test_get_trials_dataframe_no_study(self, mock_engine: MagicMock) -> None:
