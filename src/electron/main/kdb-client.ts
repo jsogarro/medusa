@@ -21,6 +21,7 @@ export interface KdbConfig {
 
 export interface KdbClientOptions {
   queryTimeoutMs?: number
+  connectTimeoutMs?: number
 }
 
 export class KdbClient extends EventEmitter {
@@ -32,11 +33,13 @@ export class KdbClient extends EventEmitter {
   private shouldReconnect = true
   private readonly subscriptions = new Set<string>()
   private readonly queryTimeoutMs: number
+  private readonly connectTimeoutMs: number
 
   constructor(config: KdbConfig, options: KdbClientOptions = {}) {
     super()
     this.config = config
     this.queryTimeoutMs = options.queryTimeoutMs ?? 10_000
+    this.connectTimeoutMs = options.connectTimeoutMs ?? 10_000
     // EventEmitter throws on an 'error' event with no listener, which would crash the
     // main process and skip the reconnect scheduling. Always keep one listener attached.
     this.on('error', (err) => console.error('[KDB] Error:', err))
@@ -51,12 +54,24 @@ export class KdbClient extends EventEmitter {
 
     try {
       const connection = await new Promise<q.Connection>((resolve, reject) => {
+        // A hung connect would otherwise block callers (and the connect queue) forever.
+        let timedOut = false
+        const timer = setTimeout(() => {
+          timedOut = true
+          reject(new Error(`kdb+ connect timed out after ${this.connectTimeoutMs}ms`))
+        }, this.connectTimeoutMs)
         q.connect(
           {
             host: this.config.host,
             port: this.config.port
           },
           (error, value) => {
+            clearTimeout(timer)
+            if (timedOut) {
+              // Arrived after we gave up: do not leak the socket.
+              value?.close(() => {})
+              return
+            }
             if (error) {
               reject(error)
               return

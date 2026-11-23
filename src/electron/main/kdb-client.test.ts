@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const h = vi.hoisted(() => ({
   failConnects: 0,
   conns: [] as any[],
-  hangQueries: false
+  hangQueries: false,
+  hangConnects: false,
+  pendingConnects: [] as ((e?: Error, c?: unknown) => void)[]
 }))
 
 vi.mock('node-q', async () => {
@@ -18,12 +20,18 @@ vi.mock('node-q', async () => {
       this.ksCalls.push(expr)
       cb(undefined)
     }
+    closed = false
     close(cb: () => void) {
+      this.closed = true
       cb()
     }
   }
   return {
     connect: (_p: unknown, cb: (e?: Error, c?: unknown) => void) => {
+      if (h.hangConnects) {
+        h.pendingConnects.push(cb)
+        return
+      }
       if (h.failConnects > 0) {
         h.failConnects--
         cb(new Error('ECONNREFUSED'))
@@ -45,6 +53,8 @@ beforeEach(() => {
   h.failConnects = 0
   h.conns = []
   h.hangQueries = false
+  h.hangConnects = false
+  h.pendingConnects = []
 })
 
 afterEach(() => {
@@ -136,6 +146,21 @@ describe('KdbClient', () => {
   it('querying while disconnected throws a distinct not-connected error', async () => {
     const client = new KdbClient({ host: 'localhost', port: 1 })
     await expect(client.query('.some.fn', [1])).rejects.toMatchObject({ name: 'KdbNotConnectedError' })
+  })
+
+  it('gives up on a connect that never answers, and closes it if it arrives late', async () => {
+    h.hangConnects = true
+    const client = new KdbClient({ host: 'localhost', port: 1 }, { connectTimeoutMs: 2000 })
+    const assertion = expect(client.connect()).rejects.toThrow(/connect timed out/)
+    await vi.advanceTimersByTimeAsync(2000)
+    await assertion
+    expect(client.isConnected()).toBe(false)
+
+    const late = { closed: false, close(cb: () => void) { this.closed = true; cb() }, addListener() {} }
+    h.pendingConnects[0](undefined, late)
+    expect(late.closed).toBe(true)
+    expect(client.isConnected()).toBe(false)
+    await client.disconnect()
   })
 
   it('forwards upd events', async () => {
