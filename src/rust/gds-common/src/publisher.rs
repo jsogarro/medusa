@@ -171,7 +171,8 @@ impl KdbPublisher {
                 KObject::TimestampList(vec![timestamp_nanos(&Utc::now())]),
                 KObject::SymbolList(vec![severity.to_string()]),
                 KObject::SymbolList(vec![source.to_string()]),
-                KObject::SymbolList(vec![message.to_string()]),
+                // `message:()` in the tickerplant schema: a string, not an interned symbol.
+                KObject::MixedList(vec![KObject::CharList(message.as_bytes().to_vec())]),
                 KObject::SymbolList(vec![exchange.to_string()]),
                 KObject::SymbolList(vec![symbol.to_string()]),
             ],
@@ -600,5 +601,27 @@ mod tests {
             "must not re-dial before retry_at"
         );
         assert!(p.client.is_none());
+    }
+
+    #[tokio::test]
+    async fn alert_message_is_a_string_not_a_symbol() {
+        // gds_alert.message is a general-list column (`message:()` in the tickerplant
+        // schema): free text must go in as a char list, not be interned as a symbol.
+        let (port, tp) = fake_tp().await;
+        let mut p = KdbPublisher::connect("127.0.0.1", port, "", "")
+            .await
+            .unwrap();
+        p.publish_alert("error", "src", "free text msg", "kraken", "")
+            .await
+            .unwrap();
+        let hex = tp.await.unwrap();
+        let text: String = "free text msg"
+            .bytes()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        // char list: type 10, no attribute, count 13, then the bytes
+        assert!(hex.contains(&format!("0a000d000000{}", text)));
+        // a symbol would be the bytes followed by a NUL
+        assert!(!hex.contains(&format!("{}00", text)));
     }
 }

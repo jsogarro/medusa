@@ -47,13 +47,10 @@ impl KdbClient {
             .await
             .map_err(|e| KdbError::ConnectionError(e.to_string()))?;
 
-        // Send authentication credentials
-        // Format: "username:password\x03\x00"
-        let auth_msg = if username.is_empty() && password.is_empty() {
-            ":\x03\x00".to_string()
-        } else {
-            format!("{}:{}\x03\x00", username, password)
-        };
+        // Login string: "username:password" plus an optional capability byte, then NUL.
+        // Capability bytes 1-3 let the server compress replies and the decoder cannot
+        // read those, so none is sent: that is capability 0 (kdb+ IPC protocol docs).
+        let auth_msg = format!("{}:{}\0", username, password);
 
         stream
             .write_all(auth_msg.as_bytes())
@@ -61,7 +58,8 @@ impl KdbClient {
             .map_err(|e| KdbError::ConnectionError(e.to_string()))?;
 
         // The server replies with one capability byte (the protocol version both
-        // sides agreed on, 3 for q 4.x) and closes the socket if the login is rejected.
+        // sides agreed on; 0 for a capability-0 login) and closes the socket if the
+        // login is rejected.
         let mut response = [0u8; 1];
         match timeout(NETWORK_TIMEOUT, stream.read_exact(&mut response))
             .await
@@ -72,10 +70,6 @@ impl KdbClient {
                 return Err(KdbError::AuthenticationFailed)
             }
             Err(e) => return Err(KdbError::ConnectionError(e.to_string())),
-        }
-
-        if response[0] == 0 {
-            return Err(KdbError::AuthenticationFailed);
         }
 
         tracing::info!("Successfully connected and authenticated");
@@ -300,5 +294,36 @@ mod tests {
         let result = KdbClient::connect("192.0.2.1", 9999, "", "").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), KdbError::ConnectionError(_)));
+    }
+
+    /// Fake kdb+ listener that returns the login string it received (without the NUL).
+    async fn capturing_q(reply: u8) -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut login = Vec::new();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+                login.push(b[0]);
+            }
+            sock.write_all(&[reply]).await.unwrap();
+            login
+        });
+        (port, task)
+    }
+
+    #[tokio::test]
+    async fn test_login_does_not_advertise_compression() {
+        // Capability bytes 1-3 all enable compressed replies, which the decoder
+        // rejects; the only byte that does not is 0, which is sent by omitting it.
+        let (port, login) = capturing_q(0).await;
+        let result = KdbClient::connect("127.0.0.1", port, "user", "pw").await;
+        assert!(result.is_ok(), "a capability-0 reply is a successful login");
+        assert_eq!(login.await.unwrap(), b"user:pw");
     }
 }
