@@ -12,8 +12,12 @@ use chrono::{DateTime, Utc};
 use exchange_connector::types::{OrderBook, PriceLevel, Side, Trade};
 use kdb_ipc::types::KObject;
 use kdb_ipc::KdbClient;
+use kdb_ipc::KdbError;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+
+/// Upper bound on the confirmation round trip after a batch of trades.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Upper bound on a single (re)connect attempt.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -116,6 +120,39 @@ impl KdbPublisher {
             trade.exchange, sym, trade.id
         );
         self.send(msg).await
+    }
+
+    /// Publish trades and confirm the Tickerplant connection was still alive
+    /// after the writes.
+    ///
+    /// Async sends only prove the bytes reached the local socket: after the
+    /// Tickerplant dies the first write still succeeds and the trade is lost. One
+    /// sync round trip after the batch fails if the peer is gone, and q handles
+    /// messages in order, so a reply means every earlier message was received.
+    /// On `Err` the caller must treat the whole batch as unpublished and resend it
+    /// (at-least-once: part of it may already have landed).
+    pub async fn publish_trades_confirmed(&mut self, trades: &[Trade]) -> Result<()> {
+        if trades.is_empty() {
+            return Ok(());
+        }
+        for t in trades {
+            self.publish_trade(t).await?;
+        }
+        let Some(client) = self.client.as_mut() else {
+            bail!("Not connected to Tickerplant");
+        };
+        match tokio::time::timeout(CONFIRM_TIMEOUT, client.query("1b")).await {
+            // A q-side error reply still proves the peer was alive and read the batch.
+            Ok(Ok(_)) | Ok(Err(KdbError::KdbRuntimeError(_))) => Ok(()),
+            other => {
+                self.client = None;
+                let reason = match other {
+                    Ok(Err(e)) => e.to_string(),
+                    _ => "timed out".to_string(),
+                };
+                bail!("Tickerplant did not confirm the batch: {}", reason)
+            }
+        }
     }
 
     /// Publish a GDS alert to the Tickerplant.
@@ -374,5 +411,87 @@ mod tests {
         p.retry_at = None;
         p.publish_trade(&sample_trade("1", 100.0)).await.unwrap();
         assert!(!tp.await.unwrap().is_empty());
+    }
+
+    /// Fake Tickerplant serving one connection: handshake, then counts async
+    /// messages and answers every sync one with a boolean atom, as q does.
+    async fn serving_tp(port: u16) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asyncs = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = asyncs.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+            }
+            sock.write_all(&[3]).await.unwrap();
+            loop {
+                let mut header = [0u8; 8];
+                if sock.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+                let mut body = vec![0u8; len - 8];
+                if sock.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                if header[1] == 1 {
+                    sock.write_all(&[1, 2, 0, 0, 10, 0, 0, 0, 0xff, 1])
+                        .await
+                        .unwrap();
+                } else {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        (port, asyncs)
+    }
+
+    #[tokio::test]
+    async fn confirmed_publish_succeeds_against_a_live_tickerplant() {
+        let (port, asyncs) = serving_tp(0).await;
+        let mut p = KdbPublisher::connect("127.0.0.1", port, "", "")
+            .await
+            .unwrap();
+        p.publish_trades_confirmed(&[sample_trade("1", 100.0), sample_trade("2", 100.0)])
+            .await
+            .unwrap();
+        assert_eq!(asyncs.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn confirmed_publish_fails_when_the_tickerplant_died_after_the_write() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Tickerplant that logs in and then dies: the async write still "succeeds".
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+            }
+            sock.write_all(&[3]).await.unwrap();
+        });
+        let mut p = KdbPublisher::connect("127.0.0.1", port, "", "")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(p
+            .publish_trades_confirmed(&[sample_trade("1", 100.0)])
+            .await
+            .is_err());
     }
 }

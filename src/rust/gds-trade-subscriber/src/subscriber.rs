@@ -6,9 +6,10 @@
 
 use crate::deduplicator::TradeDeduplicator;
 use crate::exchange_adapter::{
-    BitstampTradeAdapter, CoinbaseTradeAdapter, KrakenTradeAdapter, TradeAdapter,
+    BitstampTradeAdapter, CoinbaseTradeAdapter, KrakenTradeAdapter, NormalizedTrade, TradeAdapter,
 };
 use anyhow::{Context, Result};
+use exchange_connector::types::Trade;
 use futures_util::{SinkExt, StreamExt};
 use gds_common::{ExchangeConfig, ExponentialBackoff, HealthMonitor, KdbPublisher};
 use std::sync::Arc;
@@ -27,7 +28,13 @@ pub struct TradeSubscriber {
     deduplicator: TradeDeduplicator,
     adapter: Arc<dyn TradeAdapter>,
     backfill_enabled: bool,
+    /// Trades sent (or still to be sent) but not yet confirmed by the Tickerplant.
+    /// They are resent with the next batch and recorded as seen only once confirmed.
+    pending: Vec<Trade>,
 }
+
+/// Unconfirmed trades kept for resending; beyond this the oldest are dropped.
+const MAX_PENDING: usize = 10_000;
 
 impl TradeSubscriber {
     /// Create a new trade subscriber
@@ -52,6 +59,7 @@ impl TradeSubscriber {
             deduplicator: TradeDeduplicator::default(),
             adapter,
             backfill_enabled,
+            pending: Vec::new(),
         })
     }
 
@@ -180,43 +188,53 @@ impl TradeSubscriber {
     /// Process a WebSocket message
     async fn process_message(&mut self, text: &str) {
         match self.adapter.parse_message(text) {
-            Ok(trades) => {
-                for normalized_trade in trades {
-                    // Deduplicate
-                    if self.deduplicator.is_duplicate(&normalized_trade.trade_id) {
-                        debug!(
-                            "[{}] Duplicate trade: {}",
-                            self.exchange_name(),
-                            normalized_trade.trade_id
-                        );
-                        continue;
-                    }
-
-                    // Publish, and only then record: a trade that was not published
-                    // must stay eligible for redelivery or backfill.
-                    let trade = normalized_trade.into_trade();
-                    if let Err(e) = self.publisher.publish_trade(&trade).await {
-                        error!(
-                            "[{}] Failed to publish trade {}: {}",
-                            self.exchange_name(),
-                            trade.id,
-                            e
-                        );
-                    } else {
-                        self.deduplicator.record(&trade.id);
-                        debug!(
-                            "[{}] Published trade: {} @ {} x {}",
-                            self.exchange_name(),
-                            trade.id,
-                            trade.price,
-                            trade.quantity
-                        );
-                    }
-                }
-            }
+            Ok(trades) => self.publish_confirmed(trades).await,
             Err(e) => {
                 // Not all messages are trades, so this is often expected
                 debug!("[{}] Failed to parse message: {}", self.exchange_name(), e);
+            }
+        }
+    }
+
+    /// Queue new trades and publish everything unconfirmed. A trade is recorded as
+    /// seen only once the Tickerplant has confirmed the batch; otherwise it stays
+    /// queued and goes out again with the next batch.
+    async fn publish_confirmed(&mut self, trades: Vec<NormalizedTrade>) {
+        for normalized_trade in trades {
+            let trade = normalized_trade.into_trade();
+            if self.deduplicator.is_duplicate(&trade.id)
+                || self.pending.iter().any(|p| p.id == trade.id)
+            {
+                debug!("[{}] Duplicate trade: {}", self.exchange_name(), trade.id);
+                continue;
+            }
+            self.pending.push(trade);
+        }
+        if self.pending.is_empty() {
+            return;
+        }
+        match self.publisher.publish_trades_confirmed(&self.pending).await {
+            Ok(()) => {
+                for trade in self.pending.drain(..) {
+                    self.deduplicator.record(&trade.id);
+                }
+            }
+            Err(e) => {
+                error!(
+                    "[{}] Failed to publish {} trades, will resend: {}",
+                    self.exchange_name(),
+                    self.pending.len(),
+                    e
+                );
+                if self.pending.len() > MAX_PENDING {
+                    let excess = self.pending.len() - MAX_PENDING;
+                    warn!(
+                        "[{}] Dropping {} oldest unconfirmed trades",
+                        self.exchange_name(),
+                        excess
+                    );
+                    self.pending.drain(..excess);
+                }
             }
         }
     }
@@ -225,7 +243,8 @@ impl TradeSubscriber {
     async fn backfill_trades(&mut self) -> Result<()> {
         info!("[{}] Backfilling recent trades", self.exchange_name());
 
-        for symbol in &self.config.symbols {
+        let symbols = self.config.symbols.clone();
+        for symbol in &symbols {
             match self
                 .adapter
                 .fetch_recent_trades(symbol, 100)
@@ -245,22 +264,7 @@ impl TradeSubscriber {
                         symbol
                     );
 
-                    for normalized_trade in trades {
-                        // Deduplicate
-                        if self.deduplicator.is_duplicate(&normalized_trade.trade_id) {
-                            continue;
-                        }
-
-                        let trade = normalized_trade.into_trade();
-                        match self.publisher.publish_trade(&trade).await {
-                            Ok(()) => self.deduplicator.record(&trade.id),
-                            Err(e) => warn!(
-                                "[{}] Failed to publish backfilled trade: {}",
-                                self.exchange_name(),
-                                e
-                            ),
-                        }
-                    }
+                    self.publish_confirmed(trades).await;
                 }
                 Err(e) => {
                     warn!("{}", e);
@@ -302,12 +306,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn successful_publish_marks_trade_as_seen() {
+    /// Fake Tickerplant: handshake, then counts async messages and answers every
+    /// sync one with a boolean atom, as q does.
+    async fn serving_tp(port: u16) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
-        let tp = tokio::spawn(async move {
+        let asyncs = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = asyncs.clone();
+        tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut b = [0u8; 1];
             loop {
@@ -317,13 +327,74 @@ mod tests {
                 }
             }
             sock.write_all(&[3]).await.unwrap();
-            let mut header = [0u8; 8];
-            sock.read_exact(&mut header).await.unwrap();
+            loop {
+                let mut header = [0u8; 8];
+                if sock.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+                let mut body = vec![0u8; len - 8];
+                if sock.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                if header[1] == 1 {
+                    sock.write_all(&[1, 2, 0, 0, 10, 0, 0, 0, 0xff, 1])
+                        .await
+                        .unwrap();
+                } else {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            }
         });
+        (port, asyncs)
+    }
+
+    #[tokio::test]
+    async fn successful_publish_marks_trade_as_seen() {
+        let (port, _asyncs) = serving_tp(0).await;
         let mut sub = subscriber(port);
         sub.process_message(BITSTAMP_TRADE).await;
-        tp.await.unwrap();
         assert!(sub.deduplicator.is_duplicate("123456"));
+    }
+
+    #[tokio::test]
+    async fn trade_written_to_a_dead_tickerplant_is_resent_after_reconnect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Tickerplant that logs the publisher in and then dies: the first async
+        // write still "succeeds", so the trade must not be recorded as seen.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dying = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            loop {
+                sock.read_exact(&mut b).await.unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+            }
+            sock.write_all(&[3]).await.unwrap();
+        });
+        let mut sub = subscriber(port);
+        sub.publisher = KdbPublisher::connect("127.0.0.1", port, "", "")
+            .await
+            .unwrap();
+        dying.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        sub.process_message(BITSTAMP_TRADE).await;
+        assert!(
+            !sub.deduplicator.is_duplicate("123456"),
+            "a trade the tickerplant never confirmed must not be recorded as seen"
+        );
+
+        // The tickerplant comes back: the unconfirmed trade goes out again with the next one.
+        let (_, asyncs) = serving_tp(port).await;
+        let next = BITSTAMP_TRADE.replace("123456", "123457");
+        sub.process_message(&next).await;
+        assert_eq!(asyncs.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(sub.deduplicator.is_duplicate("123456"));
+        assert!(sub.deduplicator.is_duplicate("123457"));
     }
 
     #[tokio::test]
