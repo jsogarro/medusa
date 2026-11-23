@@ -15,6 +15,8 @@ describe('isTrustedUrl', () => {
     // Any other file that merely ends in /renderer/index.html is not the app's page.
     expect(isTrustedUrl('file:///tmp/evil/renderer/index.html', false)).toBe(false)
     expect(isTrustedUrl('file://evil-host/renderer/index.html', false)).toBe(false)
+    // Same path as the app's page, but on a remote host.
+    expect(isTrustedUrl(OWN_PAGE.replace('file:///', 'file://evil-host/'), false)).toBe(false)
     expect(isTrustedUrl('file:///etc/passwd', false)).toBe(false)
     expect(isTrustedUrl('https://evil.example/renderer/index.html', false)).toBe(false)
     expect(isTrustedUrl('http://localhost:5173/', false)).toBe(false)

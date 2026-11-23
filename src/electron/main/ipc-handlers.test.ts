@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   subscribed: [] as string[],
   connectGate: undefined as Promise<void> | undefined,
   placeGate: undefined as Promise<void> | undefined,
+  failNextConnect: false,
   windows: [] as any[],
   respond: (_fn: string, _args?: any[]): any => undefined
 }))
@@ -38,6 +39,10 @@ vi.mock('./kdb-client', async () => {
     }
     async connect() {
       await h.connectGate
+      if (h.failNextConnect) {
+        h.failNextConnect = false
+        throw new Error('ECONNREFUSED')
+      }
       this.connected = true
     }
     async disconnect() {
@@ -393,6 +398,13 @@ describe('kdb:connect', () => {
     const created = h.clients.slice(before)
     expect(created).toHaveLength(2) // one tp + one rdb, shared by both calls
     expect(created.every((c) => c.connected && c.disconnects === 0)).toBe(true)
+  })
+
+  it('a failed connect does not poison the queue for the next one', async () => {
+    const next = { ...cfg, rdb: { host: 'localhost', port: 6300 } }
+    h.failNextConnect = true
+    expect((await call('kdb:connect', next)).success).toBe(false)
+    expect((await call('kdb:connect', next)).success).toBe(true)
   })
 
   it('reconnects when the config changes', async () => {
