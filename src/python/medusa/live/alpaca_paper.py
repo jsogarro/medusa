@@ -14,6 +14,7 @@ try:
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import (
         GetOrdersRequest,
+        GetPortfolioHistoryRequest,
         MarketOrderRequest,
     )
 
@@ -30,7 +31,8 @@ def _normalize_side(side: str) -> str:
     return side
 
 
-_PERIODS = ("1D", "1W", "1M", "3M", "1Y", "all")
+# Alpaca's period tokens are number + D/W/M/A (A = year); "1Y" is accepted as an alias.
+_PERIODS = ("1D", "1W", "1M", "3M", "1Y", "1A")
 
 
 def _normalize_period(period: str) -> str:
@@ -236,28 +238,15 @@ class AlpacaPaperClient:
         """Get portfolio equity history.
 
         Args:
-            period: Time period ("1D", "1W", "1M", "3M", "1Y", "all")
+            period: Time period ("1D", "1W", "1M", "3M", "1Y" or "1A")
             timeframe: Sampling interval ("1Min", "5Min", "15Min", "1H", "1D")
 
         Returns:
             DataFrame with columns: timestamp, equity, profit_loss, profit_loss_pct
         """
-        from alpaca.trading.enums import PortfolioHistoryPeriod
-
-        period_map = {
-            "1D": PortfolioHistoryPeriod.DAY_1,
-            "1W": PortfolioHistoryPeriod.WEEK_1,
-            "1M": PortfolioHistoryPeriod.MONTH_1,
-            "3M": PortfolioHistoryPeriod.MONTH_3,
-            "1Y": PortfolioHistoryPeriod.YEAR_1,
-            "all": PortfolioHistoryPeriod.ALL,
-        }
-
-        period_enum = period_map[_normalize_period(period)]
-
+        token = _normalize_period(period).replace("1Y", "1A")
         history = self.client.get_portfolio_history(
-            period=period_enum,
-            timeframe=timeframe,
+            history_filter=GetPortfolioHistoryRequest(period=token, timeframe=timeframe)
         )
 
         # Convert to DataFrame

@@ -164,3 +164,77 @@ def test_q_long_accepts_numpy_ints_but_not_bool_or_float():
     for bad in (np.bool_(True), True, np.float64(1.0), 1.0, "1"):
         with pytest.raises(ValueError):
             q_long(bad)
+
+
+# --- secrets, side and period normalisation -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "module,cls", [("kdb_loader", "KdbDataLoader"), ("equity_kdb_loader", "EquityKdbLoader")]
+)
+def test_loader_passes_plain_password_to_pykx(monkeypatch, module, cls):
+    import importlib
+
+    from medusa.utils.config import KdbConfig
+
+    fake = types.ModuleType("pykx")
+    fake.QConnection = MagicMock()
+    monkeypatch.setitem(sys.modules, "pykx", fake)
+    loader = getattr(importlib.import_module(f"medusa.data.{module}"), cls)(
+        KdbConfig(username="u", password="s3cret")
+    )
+    loader.connect()
+    assert fake.QConnection.call_args.kwargs["password"] == "s3cret"
+    assert type(fake.QConnection.call_args.kwargs["password"]) is str
+
+
+def test_normalize_side():
+    from medusa.live.alpaca_paper import _normalize_side
+
+    assert _normalize_side("BUY") == "buy"
+    assert _normalize_side("Sell") == "sell"
+    for bad in ("buyy", "sel", "", "short"):
+        with pytest.raises(ValueError):
+            _normalize_side(bad)
+
+
+@pytest.fixture
+def paper_client():
+    from unittest.mock import patch
+
+    from medusa.live.alpaca_paper import AlpacaPaperClient
+
+    with (
+        patch("medusa.live.alpaca_paper.ALPACA_TRADING_AVAILABLE", True),
+        patch("medusa.live.alpaca_paper.TradingClient") as tc,
+    ):
+        yield AlpacaPaperClient(api_key="k", secret_key="s"), tc.return_value
+
+
+def test_submit_order_with_typo_side_is_rejected_not_sold(paper_client):
+    client, api = paper_client
+    with pytest.raises(ValueError):
+        client.submit_order(symbol="AAPL", qty=1, side="buyy")
+    api.submit_order.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "given,sent",
+    [("1D", "1D"), ("1W", "1W"), ("1M", "1M"), ("3M", "3M"), ("1Y", "1A"), ("1A", "1A")],
+)
+def test_portfolio_history_period_is_sent_in_alpacas_tokens(paper_client, given, sent):
+    client, api = paper_client
+    api.get_portfolio_history.return_value = MagicMock(
+        timestamp=[1704067200], equity=[1.0], profit_loss=[0.0], profit_loss_pct=[0.0]
+    )
+    client.get_portfolio_history(period=given, timeframe="1D")
+    req = api.get_portfolio_history.call_args.kwargs["history_filter"]
+    assert (req.period, req.timeframe) == (sent, "1D")
+
+
+@pytest.mark.parametrize("bad", ["2Y", "1m", "", "all", "1M; drop"])
+def test_portfolio_history_rejects_unknown_period(paper_client, bad):
+    client, api = paper_client
+    with pytest.raises(ValueError):
+        client.get_portfolio_history(period=bad)
+    api.get_portfolio_history.assert_not_called()
