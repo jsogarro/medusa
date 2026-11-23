@@ -106,6 +106,17 @@ def test_full_report_threads_periods():
     assert d365["calmar_ratio"] == pytest.approx(RiskAnalytics.calmar_ratio(r, periods=365))
 
 
+def test_optimizer_rejects_minimizing_max_drawdown():
+    from medusa.backtest.optimizer import OptunaOptimizer
+
+    opt = OptunaOptimizer(types.SimpleNamespace(), n_trials=1)
+    price = pd.Series([1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="max_drawdown"):
+        opt.optimize_strategy(
+            price, lambda p, **k: (p > 0, p > 0), {}, metric="max_drawdown", direction="minimize"
+        )
+
+
 @pytest.mark.parametrize("as_frame", [False, True])
 def test_run_signals_accepts_array_like_signals(monkeypatch, as_frame):
     captured = {}

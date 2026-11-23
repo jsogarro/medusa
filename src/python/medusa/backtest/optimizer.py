@@ -138,7 +138,15 @@ class OptunaOptimizer:
 
         Returns:
             Dictionary with best parameters.
+
+        Raises:
+            ValueError: If ``metric`` is max_drawdown and ``direction`` is "minimize":
+                the metric is already higher-is-better, so minimizing it picks the deepest drawdown.
         """
+        if metric == "max_drawdown" and direction == "minimize":
+            raise ValueError(
+                "max_drawdown is higher-is-better (0 is best); use direction='maximize'"
+            )
 
         def objective(trial: optuna.Trial) -> float:
             # Suggest parameters
