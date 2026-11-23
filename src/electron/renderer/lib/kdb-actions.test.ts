@@ -121,6 +121,20 @@ describe('submitOrder', () => {
     expect(r.message).toMatch(/outcome unknown.*open orders/i)
   })
 
+  it.each(['vwap', 'twap', 'iceberg'])('refuses %s algo orders and places nothing', async (algo) => {
+    const kdb = bridge({ success: true, data: { orderId: 'O1' } })
+    const r = await submitOrder(kdb, order, algo)
+    expect(r).toMatchObject({ ok: false, hold: false })
+    expect(r.message).toMatch(/algo.*not available/i)
+    expect(kdb.placeOrder).not.toHaveBeenCalled()
+  })
+
+  it('still places a direct order', async () => {
+    const kdb = bridge({ success: true, data: { orderId: 'O1' } })
+    expect((await submitOrder(kdb, order, 'direct')).ok).toBe(true)
+    expect(kdb.placeOrder).toHaveBeenCalledTimes(1)
+  })
+
   it('reports a failure when the bridge rejects or is missing', async () => {
     const rejecting = { placeOrder: vi.fn().mockRejectedValue(new Error('boom')) }
     expect((await submitOrder(rejecting, order)).ok).toBe(false)

@@ -50,7 +50,15 @@ export interface SubmitOutcome extends ActionOutcome {
 }
 
 /** Place an order and describe the result. The main process answers { success: false } instead of rejecting. */
-export async function submitOrder(kdb: OrderBridge | undefined, order: unknown): Promise<SubmitOutcome> {
+export async function submitOrder(
+  kdb: OrderBridge | undefined,
+  order: unknown,
+  algoType: string = 'direct'
+): Promise<SubmitOutcome> {
+  // ponytail: no algo execution path exists in the main process yet; never fall back to a direct full-size order.
+  if (algoType !== 'direct') {
+    return { ok: false, hold: false, message: `Algo orders (${algoType}) are not available yet: nothing was placed.` }
+  }
   if (!kdb) return { ok: false, hold: false, message: `Order failed: ${UNAVAILABLE}` }
   try {
     const result = await kdb.placeOrder(order)

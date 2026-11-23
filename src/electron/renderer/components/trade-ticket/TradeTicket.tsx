@@ -94,7 +94,7 @@ export const TradeTicket = memo(function TradeTicket({ linkColor = 'none' }: Tra
     await submitGuard(async () => {
       setSubmitting(true)
       try {
-        const outcome = await submitOrder(window.kdb, order)
+        const outcome = await submitOrder(window.kdb, order, algoParams.type)
         alert(outcome.message)
         if (outcome.ok) {
           setPrice('')
