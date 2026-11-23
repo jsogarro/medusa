@@ -712,10 +712,16 @@ impl TradeAdapter for KrakenTradeAdapter {
                 .and_then(|s| s.as_str())
                 .ok_or_else(|| anyhow!("Invalid side"))?;
 
-            let side = if side_str == "buy" {
-                Side::Buy
-            } else {
-                Side::Sell
+            let side = match side_str {
+                "buy" => Side::Buy,
+                "sell" => Side::Sell,
+                other => {
+                    warn!(
+                        "Skipping Kraken trade with unknown side {:?} for {}",
+                        other, symbol
+                    );
+                    continue;
+                }
             };
 
             // v2 uses RFC3339 timestamp strings
@@ -1069,5 +1075,17 @@ mod tests {
             .unwrap();
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].trade_id, "7");
+    }
+
+    #[test]
+    fn test_kraken_ws_trade_with_unknown_side_is_skipped() {
+        let adapter = KrakenTradeAdapter::new("http://test".to_string());
+        let json = r#"{"channel":"trade","type":"update","data":[
+            {"symbol":"BTC/USD","side":"sel","price":100.0,"qty":1.0,"ord_type":"limit","trade_id":8,"timestamp":"2024-01-01T00:00:00.123456Z"},
+            {"symbol":"BTC/USD","side":"sell","price":100.0,"qty":1.0,"ord_type":"limit","trade_id":9,"timestamp":"2024-01-01T00:00:00.123789Z"}]}"#;
+        let trades = adapter.parse_message(json).unwrap();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].trade_id, "9");
+        assert_eq!(trades[0].side, Side::Sell);
     }
 }
