@@ -322,11 +322,12 @@ impl ExchangeClient for BitstampClient {
 
     async fn get_balance(&self, asset: Option<&str>) -> Result<Vec<Balance>, ExchangeError> {
         let url = format!("{}/balance/", BASE_URL);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/balance"), 1).await;
         let nonce = Self::get_nonce();
         let signature = self.generate_signature(nonce, "");
 
         trace!("Fetching Bitstamp balance");
-        self.rate_limiter.acquire(Some("/balance"), 1).await;
 
         let response = self
             .client
@@ -401,11 +402,12 @@ impl ExchangeClient for BitstampClient {
             format!("{}/open_orders/all/", BASE_URL)
         };
 
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/open_orders"), 1).await;
         let nonce = Self::get_nonce();
         let signature = self.generate_signature(nonce, "");
 
         trace!("Fetching Bitstamp open orders");
-        self.rate_limiter.acquire(Some("/open_orders"), 1).await;
 
         let response = self
             .client
@@ -483,11 +485,12 @@ impl ExchangeClient for BitstampClient {
 
     async fn cancel_order(&self, order_id: &str) -> Result<(), ExchangeError> {
         let url = format!("{}/cancel_order/", BASE_URL);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/cancel_order"), 1).await;
         let nonce = Self::get_nonce();
         let signature = self.generate_signature(nonce, "");
 
         debug!("Cancelling Bitstamp order: {}", order_id);
-        self.rate_limiter.acquire(Some("/cancel_order"), 1).await;
 
         let response = self
             .client
@@ -521,13 +524,14 @@ impl ExchangeClient for BitstampClient {
             format!("{}/cancel_all_orders/", BASE_URL)
         };
 
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter
+            .acquire(Some("/cancel_all_orders"), 1)
+            .await;
         let nonce = Self::get_nonce();
         let signature = self.generate_signature(nonce, "");
 
         debug!("Cancelling all Bitstamp orders for {:?}", pair);
-        self.rate_limiter
-            .acquire(Some("/cancel_all_orders"), 1)
-            .await;
 
         let response = self
             .client
@@ -635,5 +639,37 @@ mod tests {
         assert_eq!((buy.side, sell.side), (Side::Buy, Side::Sell));
         assert!(BitstampClient::open_order_from(open_row("2"), None).is_err());
         assert!(BitstampClient::open_order_from(open_row(""), None).is_err());
+    }
+
+    /// A request queued behind the rate limiter must not have taken (and
+    /// signed) its nonce yet, or it would reach the venue out of order.
+    #[tokio::test]
+    async fn queued_signed_requests_take_no_nonce_until_released() {
+        use std::time::Duration;
+        let c = BitstampClient::new("k".into(), "s".into(), "c".into());
+        for ep in [
+            "/balance",
+            "/open_orders",
+            "/cancel_order",
+            "/cancel_all_orders",
+        ] {
+            c.rate_limiter.set_endpoint_limit(ep, 1).await;
+            while c.rate_limiter.try_acquire(Some(ep), 1).await {}
+        }
+        let before = NONCE_COUNTER.load(Ordering::Acquire);
+        let wait = Duration::from_millis(50);
+        assert!(tokio::time::timeout(wait, c.get_balance(None))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.get_open_orders(None))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.cancel_order("1"))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.cancel_all_orders(None))
+            .await
+            .is_err());
+        assert_eq!(NONCE_COUNTER.load(Ordering::Acquire), before);
     }
 }

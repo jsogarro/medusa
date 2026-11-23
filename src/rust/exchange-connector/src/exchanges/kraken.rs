@@ -378,13 +378,14 @@ impl ExchangeClient for KrakenClient {
     async fn get_balance(&self, asset: Option<&str>) -> Result<Vec<Balance>, ExchangeError> {
         let path = "/0/private/Balance";
         let url = format!("{}{}", BASE_URL, path);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/Balance"), 1).await;
         let nonce = Self::get_nonce();
         let postdata = format!("nonce={}", nonce);
 
         let signature = self.generate_signature(path, nonce, &postdata)?;
 
         trace!("Fetching Kraken balance");
-        self.rate_limiter.acquire(Some("/Balance"), 1).await;
 
         let response = self
             .client
@@ -443,13 +444,14 @@ impl ExchangeClient for KrakenClient {
     async fn get_open_orders(&self, _pair: Option<&str>) -> Result<Vec<Order>, ExchangeError> {
         let path = "/0/private/OpenOrders";
         let url = format!("{}{}", BASE_URL, path);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/OpenOrders"), 1).await;
         let nonce = Self::get_nonce();
         let postdata = format!("nonce={}", nonce);
 
         let signature = self.generate_signature(path, nonce, &postdata)?;
 
         trace!("Fetching Kraken open orders");
-        self.rate_limiter.acquire(Some("/OpenOrders"), 1).await;
 
         let response = self
             .client
@@ -562,13 +564,14 @@ impl ExchangeClient for KrakenClient {
     async fn cancel_order(&self, order_id: &str) -> Result<(), ExchangeError> {
         let path = "/0/private/CancelOrder";
         let url = format!("{}{}", BASE_URL, path);
+        // Wait for the limiter before minting the nonce that gets signed.
+        self.rate_limiter.acquire(Some("/CancelOrder"), 1).await;
         let nonce = Self::get_nonce();
         let postdata = format!("nonce={}&txid={}", nonce, order_id);
 
         let signature = self.generate_signature(path, nonce, &postdata)?;
 
         debug!("Cancelling Kraken order: {}", order_id);
-        self.rate_limiter.acquire(Some("/CancelOrder"), 1).await;
 
         let response = self
             .client
@@ -699,5 +702,29 @@ mod tests {
             open_info_with_status("buy", "limit", "closed")
         )
         .is_err());
+    }
+
+    /// A request queued behind the rate limiter must not have taken (and
+    /// signed) its nonce yet, or it would reach the venue out of order.
+    #[tokio::test]
+    async fn queued_signed_requests_take_no_nonce_until_released() {
+        use std::time::Duration;
+        let c = KrakenClient::new("k".into(), "c2VjcmV0".into());
+        for ep in ["/Balance", "/OpenOrders", "/CancelOrder"] {
+            c.rate_limiter.set_endpoint_limit(ep, 1).await;
+            while c.rate_limiter.try_acquire(Some(ep), 1).await {}
+        }
+        let before = NONCE_COUNTER.load(Ordering::Acquire);
+        let wait = Duration::from_millis(50);
+        assert!(tokio::time::timeout(wait, c.get_balance(None))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.get_open_orders(None))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, c.cancel_order("O1"))
+            .await
+            .is_err());
+        assert_eq!(NONCE_COUNTER.load(Ordering::Acquire), before);
     }
 }
